@@ -259,7 +259,7 @@ impl Scenario {
     pub async fn when(self, builder: HumanifyCmdBuilder) -> Outcome {
         let input_path = self.input_path.clone();
         let output = tokio::task::spawn_blocking(move || {
-            let mut cmd = assert_cmd::Command::cargo_bin("humanify").unwrap();
+            let mut cmd = assert_cmd::Command::cargo_bin("humanify-lua").unwrap();
             cmd.arg(&builder.subcommand);
             if let Some(m) = &builder.model {
                 cmd.arg("--model").arg(m);

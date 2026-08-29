@@ -8,7 +8,7 @@ fn gemini_offline_identity() {
     let out = NamedTempFile::new().unwrap();
     let out_path = out.path().to_owned();
 
-    Command::cargo_bin("humanify")
+    Command::cargo_bin("humanify-lua")
         .unwrap()
         .args([
             "gemini",
@@ -31,7 +31,7 @@ fn verbose_reports_resolved_config_and_rename_steps_to_stderr() {
     let out = NamedTempFile::new().unwrap();
     let out_path = out.path().to_owned();
 
-    let assert = Command::cargo_bin("humanify")
+    let assert = Command::cargo_bin("humanify-lua")
         .unwrap()
         .args([
             "openai",
@@ -82,7 +82,7 @@ fn progress_writes_plain_snapshots_to_redirected_stderr() {
     let out = NamedTempFile::new().unwrap();
     let out_path = out.path().to_owned();
 
-    let assert = Command::cargo_bin("humanify")
+    let assert = Command::cargo_bin("humanify-lua")
         .unwrap()
         .args([
             "openai",
