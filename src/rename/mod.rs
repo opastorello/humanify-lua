@@ -1,5 +1,6 @@
 mod collision;
 mod safe_name;
+mod scope;
 #[cfg(test)]
 pub mod test_dsl;
 mod walker;
@@ -26,6 +27,6 @@ impl RenameObserver for NoopRenameObserver {}
 
 #[derive(Debug, thiserror::Error)]
 pub enum RenameError {
-    #[error("failed to parse JavaScript: {0}")]
+    #[error("failed to parse Lua: {0}")]
     Parse(String),
 }

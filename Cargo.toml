@@ -1,21 +1,13 @@
 [package]
-name = "humanify"
+name = "humanify-lua"
 version = "3.1.1"
 edition = "2021"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
-oxc_allocator = "0.126.0"
-oxc_ast = "0.126.0"
-oxc_parser = "0.126.0"
-oxc_semantic = "0.126.0"
-oxc_syntax = "0.126.0"
-oxc_codegen = "0.126.0"
-oxc_span = "0.126.0"
 thiserror = "2.0.18"
-oxc_str = "0.126.0"
-unicode-ident = "1"
+full_moon = { version = "2.2", default-features = false, features = ["lua54", "luajit", "cfxlua", "serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

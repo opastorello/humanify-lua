@@ -1,15 +1,11 @@
 use clap::{error::ErrorKind, Parser, Subcommand};
-use humanify::cli::{anthropic, gemini, ollama, openai, openrouter, requesty};
+use humanify_lua::cli::{anthropic, gemini, ollama, openai, openrouter, requesty};
 use std::path::PathBuf;
 
 const EXIT_CLI_USAGE: i32 = 64;
 
 #[derive(Parser)]
-#[command(
-    name = "humanify",
-    version,
-    about = "Un-minify JavaScript with LLM help"
-)]
+#[command(name = "humanify-lua", version, about = "Un-minify Lua with LLM help")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

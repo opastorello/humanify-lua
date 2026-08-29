@@ -1,12 +1,12 @@
-use oxc_syntax::keyword::is_reserved_keyword;
-use unicode_ident::is_xid_continue;
-
-/// Normalize an arbitrary string into a valid JavaScript identifier.
+/// Normalize an arbitrary string into a valid Lua identifier.
 ///
-/// - Collapses separator runs (`.`, ` `, `-`) by uppercasing the next identifier-continue char.
+/// Lua identifiers are ASCII-only: `[A-Za-z_][A-Za-z0-9_]*`, excluding keywords.
+///
+/// - Collapses separator runs (`.`, ` `, `-`) by uppercasing the next letter.
 /// - `_` is identifier-continue, NOT a separator.
-/// - Strips chars that are neither identifier-continue nor separators.
-/// - Prepends `_` if the result is empty, starts with a digit, or is a reserved word.
+/// - Strips chars that are neither identifier-continue nor separators
+///   (including any non-ASCII).
+/// - Prepends `_` if the result is empty, starts with a digit, or is a keyword.
 pub fn to_identifier(raw: &str) -> String {
     if raw.is_empty() {
         return "_".to_string();
@@ -21,13 +21,10 @@ pub fn to_identifier(raw: &str) -> String {
             if !result.is_empty() {
                 capitalize_next = true;
             }
-        } else if ch == '$' || ch == '_' || is_xid_continue(ch) {
-            // Valid identifier-continue (including `_` and `$`).
+        } else if ch == '_' || ch.is_ascii_alphanumeric() {
             if capitalize_next {
                 capitalize_next = false;
-                for c in ch.to_uppercase() {
-                    result.push(c);
-                }
+                result.push(ch.to_ascii_uppercase());
             } else {
                 result.push(ch);
             }
@@ -44,7 +41,7 @@ pub fn to_identifier(raw: &str) -> String {
         result.insert(0, '_');
     }
 
-    // Prepend `_` if the result is a reserved word.
+    // Prepend `_` if the result is a keyword.
     if is_reserved_word(&result) {
         result.insert(0, '_');
     }
@@ -52,11 +49,16 @@ pub fn to_identifier(raw: &str) -> String {
     result
 }
 
-/// Returns true iff `name` is a JS reserved word that cannot be used as a binding name.
-/// Includes strict-mode reserved words and contextual keywords (`let`, `static`, etc.).
-/// Does NOT include `async` (contextual identifier we accept as a valid binding name).
+/// Keywords across Lua 5.1–5.4 and LuaJIT. `goto` is only reserved from 5.2 on
+/// but is treated as reserved everywhere so output parses under any version.
+const KEYWORDS: &[&str] = &[
+    "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in",
+    "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
+];
+
+/// Returns true iff `name` is a Lua keyword and cannot be used as a binding name.
 pub fn is_reserved_word(name: &str) -> bool {
-    is_reserved_keyword(name)
+    KEYWORDS.contains(&name)
 }
 
 #[cfg(test)]
@@ -72,7 +74,7 @@ mod tests {
 
     #[test]
     fn strips_dot_and_camel_cases() {
-        to_identifier_of("this.kLength").is("thisKLength");
+        to_identifier_of("self.kLength").is("selfKLength");
     }
 
     #[test]
@@ -96,6 +98,16 @@ mod tests {
     }
 
     #[test]
+    fn drops_dollar_sign() {
+        to_identifier_of("$value").is("value");
+    }
+
+    #[test]
+    fn drops_non_ascii_letters() {
+        to_identifier_of("contagem_até").is("contagem_at");
+    }
+
+    #[test]
     fn empty_input_returns_underscore() {
         to_identifier_of("").is("_");
     }
@@ -111,76 +123,55 @@ mod tests {
     }
 
     #[test]
-    fn reserved_word_static() {
-        to_identifier_of("static").is("_static");
+    fn leading_separator_does_not_capitalize() {
+        to_identifier_of(".foo").is("foo");
     }
 
     #[test]
-    fn reserved_word_class() {
-        to_identifier_of("class").is("_class");
+    fn underscore_is_not_a_separator() {
+        to_identifier_of("foo_bar").is("foo_bar");
     }
 
     #[test]
-    fn reserved_word_let() {
-        to_identifier_of("let").is("_let");
+    fn keyword_end() {
+        to_identifier_of("end").is("_end");
     }
 
     #[test]
-    fn underscore_passes_through() {
-        to_identifier_of("_foo").is("_foo");
+    fn keyword_function() {
+        to_identifier_of("function").is("_function");
     }
 
     #[test]
-    fn preexisting_underscore_static() {
-        // `_static` is not in the reserved set → passes through unchanged.
-        to_identifier_of("_static").is("_static");
+    fn keyword_goto() {
+        to_identifier_of("goto").is("_goto");
     }
 
     #[test]
-    fn unicode_xid_continue_preserved() {
-        to_identifier_of("café").is("café");
+    fn keyword_nil() {
+        to_identifier_of("nil").is("_nil");
     }
 
     #[test]
-    fn dollar_sign_preserved() {
-        to_identifier_of("$dollar").is("$dollar");
-    }
-
-    #[test]
-    fn already_camel_preserved() {
-        to_identifier_of("alreadyCamel").is("alreadyCamel");
+    fn keyword_is_case_sensitive() {
+        to_identifier_of("End").is("End");
     }
 
     // --- is_reserved_word ---
 
     #[test]
-    fn true_for_static() {
-        to_identifier_of("static").is_reserved();
+    fn reserved_local() {
+        to_identifier_of("local").is_reserved();
     }
 
     #[test]
-    fn true_for_class() {
-        to_identifier_of("class").is_reserved();
+    fn not_reserved_self() {
+        // `self` is an ordinary identifier in Lua.
+        to_identifier_of("self").is_not_reserved();
     }
 
     #[test]
-    fn true_for_let() {
-        to_identifier_of("let").is_reserved();
-    }
-
-    #[test]
-    fn false_for_foo() {
-        to_identifier_of("foo").is_not_reserved();
-    }
-
-    #[test]
-    fn false_for_underscore_static() {
-        to_identifier_of("_static").is_not_reserved();
-    }
-
-    #[test]
-    fn false_for_async() {
-        // `async` is a contextual identifier we accept as a valid binding name.
-        to_identifier_of("async").is_not_reserved();
+    fn not_reserved_class() {
+        to_identifier_of("class").is_not_reserved();
     }
 }

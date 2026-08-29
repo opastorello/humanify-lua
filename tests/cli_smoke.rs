@@ -18,12 +18,12 @@ fn gemini_offline_identity() {
             "--base-url",
             "http://127.0.0.1:1",
         ])
-        .write_stdin("const x = 1;")
+        .write_stdin("local x = 1;")
         .assert()
         .success();
 
     let contents = std::fs::read_to_string(&out_path).unwrap();
-    assert_eq!(contents.trim(), "const x = 1;");
+    assert_eq!(contents.trim(), "local x = 1;");
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn verbose_reports_resolved_config_and_rename_steps_to_stderr() {
             "321",
             "--verbose",
         ])
-        .write_stdin("const x = 1;")
+        .write_stdin("local x = 1;")
         .assert()
         .success();
 
@@ -93,7 +93,7 @@ fn progress_writes_plain_snapshots_to_redirected_stderr() {
             "http://127.0.0.1:1",
             "--progress",
         ])
-        .write_stdin("const x = 1; const y = 2;")
+        .write_stdin("local x = 1; local y = 2;")
         .assert()
         .success();
 

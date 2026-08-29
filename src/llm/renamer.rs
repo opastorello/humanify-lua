@@ -6,7 +6,7 @@ use tokio::runtime::Handle;
 use crate::llm::ladder::Ladder;
 use crate::rename::Renamer;
 
-const SYSTEM_PROMPT: &str = "You are a senior software engineer reviewing minified or obfuscated JavaScript. Your job is to assign a single descriptive identifier name based on how the variable is used in the surrounding code. Return JSON only.";
+const SYSTEM_PROMPT: &str = "You are a senior software engineer reviewing minified or obfuscated Lua. Your job is to assign a single descriptive identifier name based on how the variable is used in the surrounding code. Return JSON only.";
 
 /// Bridges the synchronous `Renamer` trait to the async `Ladder` via
 /// `tokio::runtime::Handle::block_on`.
@@ -34,7 +34,7 @@ impl Renamer for LlmRenamer {
         }
 
         let user = format!(
-            "Surrounding code:\n```javascript\n{surrounding_code}\n```\n\nThe identifier currently named `{original}` appears in this code. Suggest a single descriptive replacement name. Rules:\n- camelCase for variables and functions, PascalCase for classes/constructors\n- ASCII letters, digits, underscores only; first character must be a letter or underscore\n- Avoid JavaScript reserved words\n- If the current name is already meaningful, return it unchanged"
+            "Surrounding code:\n```lua\n{surrounding_code}\n```\n\nThe identifier currently named `{original}` appears in this code. Suggest a single descriptive replacement name. Rules:\n- snake_case for variables and functions, PascalCase for tables used as classes/modules\n- ASCII letters, digits, underscores only; first character must be a letter or underscore\n- Avoid Lua reserved words\n- If the current name is already meaningful, return it unchanged"
         );
 
         let schema = json!({
@@ -177,7 +177,7 @@ mod tests {
         let s = ok("s", json!({"name":"result"}));
         let recorded = s.recorded.clone();
         let (mut r, _rt) = make_renamer(s);
-        r.rename("foo", "const foo = 1;");
+        r.rename("foo", "local foo = 1");
         let calls = recorded.lock().unwrap();
         let (system, user, schema) = &calls[0];
         assert!(
@@ -185,7 +185,7 @@ mod tests {
             "system: {system}"
         );
         assert!(
-            user.contains("const foo = 1;"),
+            user.contains("local foo = 1"),
             "user should contain surrounding code: {user}"
         );
         assert!(

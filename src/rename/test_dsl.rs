@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use super::scope::{BindingId, ScopeId, ScopeModel};
 use super::{rename_all_identifiers, Renamer};
 
 // --- Renamer constructors ---
@@ -150,12 +151,7 @@ impl ScenarioBuilder {
     pub fn parses_unchanged(self) {
         let output = rename_all_identifiers(&self.source, &mut IdentityRenamer, self.context_size)
             .expect("rename_all_identifiers failed");
-        let got = output.trim_end_matches('\n');
-        assert_eq!(
-            got,
-            self.source.trim_end_matches('\n'),
-            "source did not round-trip"
-        );
+        assert_eq!(output, self.source, "source did not round-trip");
     }
 }
 
@@ -211,5 +207,169 @@ impl IdentifierAssertion {
             "{:?} should not be reserved",
             self.raw
         );
+    }
+}
+
+// --- ModelAssertion (for scope / collision tests) ---
+
+pub struct ModelAssertion {
+    source: String,
+    model: ScopeModel,
+}
+
+pub fn model_of(source: &str) -> ModelAssertion {
+    let parsed = full_moon::parse_fallible(source, full_moon::LuaVersion::new());
+    assert!(
+        parsed.errors().is_empty(),
+        "fixture failed to parse: {:?}",
+        parsed.errors()
+    );
+    ModelAssertion {
+        source: source.to_string(),
+        model: ScopeModel::build(parsed.ast(), source.len()),
+    }
+}
+
+impl ModelAssertion {
+    pub(crate) fn model(&self) -> &ScopeModel {
+        &self.model
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    fn ids_named(&self, name: &str) -> Vec<BindingId> {
+        (0..self.model.bindings.len())
+            .filter(|&id| self.model.bindings[id].name == name)
+            .collect()
+    }
+
+    pub fn bindings_named(&self, name: &str) -> usize {
+        self.ids_named(name).len()
+    }
+
+    /// The single binding named `name`; panics if there are zero or several.
+    pub fn binding(&self, name: &str) -> BindingAssertion<'_> {
+        let ids = self.ids_named(name);
+        assert_eq!(
+            ids.len(),
+            1,
+            "expected exactly one binding named {name:?}, found {}",
+            ids.len()
+        );
+        BindingAssertion {
+            model: &self.model,
+            id: ids[0],
+        }
+    }
+
+    /// The `n`-th (declaration order) binding named `name`.
+    pub fn nth_binding(&self, name: &str, n: usize) -> BindingAssertion<'_> {
+        let ids = self.ids_named(name);
+        let id = *ids
+            .get(n)
+            .unwrap_or_else(|| panic!("no binding #{n} named {name:?} (found {})", ids.len()));
+        BindingAssertion {
+            model: &self.model,
+            id,
+        }
+    }
+
+    pub fn scope_of(&self, name: &str) -> ScopeId {
+        self.model.bindings[self.binding(name).id].scope
+    }
+
+    pub fn no_binding(&self, name: &str) -> &Self {
+        assert!(
+            self.ids_named(name).is_empty(),
+            "expected no binding named {name:?}"
+        );
+        self
+    }
+
+    pub fn free(&self, name: &str) -> &Self {
+        assert!(
+            self.model.free_refs.iter().any(|f| f.name == name),
+            "expected a free reference named {name:?}; free refs: {:?}",
+            self.model.free_refs
+        );
+        self
+    }
+
+    pub fn no_free(&self, name: &str) -> &Self {
+        assert!(
+            !self.model.free_refs.iter().any(|f| f.name == name),
+            "expected no free reference named {name:?}"
+        );
+        self
+    }
+}
+
+pub struct BindingAssertion<'a> {
+    model: &'a ScopeModel,
+    id: BindingId,
+}
+
+impl BindingAssertion<'_> {
+    pub fn has_refs(self, n: usize) -> Self {
+        let refs = &self.model.bindings[self.id].refs;
+        assert_eq!(
+            refs.len(),
+            n,
+            "binding {:?} should have {n} refs, has {:?}",
+            self.model.bindings[self.id].name,
+            refs
+        );
+        self
+    }
+
+    pub fn in_root(self) -> Self {
+        assert_eq!(self.model.bindings[self.id].scope, self.model.root());
+        self
+    }
+
+    pub fn not_in_root(self) -> Self {
+        assert_ne!(self.model.bindings[self.id].scope, self.model.root());
+        self
+    }
+
+    pub fn is_not_renamable(self) -> Self {
+        assert!(!self.model.bindings[self.id].renamable);
+        self
+    }
+}
+
+// --- Collision DSL ---
+
+pub struct RenameAttempt {
+    model: ModelAssertion,
+    binding: BindingId,
+    candidate: String,
+}
+
+pub fn renaming(model: ModelAssertion, name: &str) -> RenameAttemptBuilder {
+    let binding = model.binding(name).id;
+    RenameAttemptBuilder { model, binding }
+}
+
+pub struct RenameAttemptBuilder {
+    model: ModelAssertion,
+    binding: BindingId,
+}
+
+impl RenameAttemptBuilder {
+    pub fn to(self, candidate: &str) -> RenameAttempt {
+        RenameAttempt {
+            model: self.model,
+            binding: self.binding,
+            candidate: candidate.to_string(),
+        }
+    }
+}
+
+impl RenameAttempt {
+    pub fn collides(&self) -> bool {
+        super::collision::collides(&self.model.model, self.binding, &self.candidate)
     }
 }

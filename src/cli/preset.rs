@@ -139,7 +139,18 @@ pub fn run_preset(args: PresetArgs, defaults: PresetDefaults) -> i32 {
         }
     };
 
-    let rt = match tokio::runtime::Runtime::new() {
+    // `full_moon`'s recursive-descent parser can blow the default thread stack
+    // on deeply nested input (e.g. long unparenthesized operator chains, as
+    // seen in some obfuscated/protected Lua). 64 MiB gives generous headroom
+    // over the ~16 MiB observed necessary for such files; the walker in
+    // `rename_all_identifiers_with_observer` runs on this runtime's blocking
+    // pool via `spawn_blocking`, which inherits `thread_stack_size`.
+    const PARSER_THREAD_STACK_SIZE: usize = 64 * 1024 * 1024;
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(PARSER_THREAD_STACK_SIZE)
+        .build()
+    {
         Ok(r) => r,
         Err(e) => {
             eprintln!("humanify: failed to create tokio runtime: {e}");

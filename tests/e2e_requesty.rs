@@ -5,7 +5,7 @@ use common::{given, humanify, JudgeConfig};
 #[tokio::test]
 #[ignore]
 async fn unminifies_example_file_with_requesty() {
-    given("fixtures/example.min.js")
+    given("fixtures/example.min.lua")
         .judged_by(JudgeConfig::requesty("nvidia/nemotron-3-super-120b-a12b"))
         .judge_says_minified()
         .await

@@ -5,7 +5,7 @@ pub fn read_input(input_arg: &str) -> io::Result<String> {
     if input_arg == "-" {
         let stdin = io::stdin();
         if stdin.is_terminal() {
-            eprintln!("reading minified JS from stdin... (Ctrl+D when done)");
+            eprintln!("reading minified Lua from stdin... (Ctrl+D when done)");
         }
         io::read_to_string(stdin)
     } else {
@@ -41,7 +41,7 @@ mod tests {
 
     #[test]
     fn read_input_missing_file_errors() {
-        let result = read_input("/nonexistent/path/that/does/not/exist.js");
+        let result = read_input("/nonexistent/path/that/does/not/exist.lua");
         assert!(result.is_err());
     }
 

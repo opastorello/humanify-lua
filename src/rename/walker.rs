@@ -1,13 +1,7 @@
-use std::collections::HashSet;
+use full_moon::LuaVersion;
 
-use oxc_allocator::Allocator;
-use oxc_codegen::Codegen;
-use oxc_parser::Parser;
-use oxc_semantic::{AstNodes, NodeId, Scoping, SemanticBuilder, SymbolId};
-use oxc_span::{GetSpan, SourceType};
-use oxc_str::Ident;
-
-use super::collision::CollisionResolver;
+use super::collision;
+use super::scope::{ScopeModel, Span};
 use super::{NoopRenameObserver, RenameError, RenameObserver, Renamer};
 
 pub fn rename_all_identifiers(
@@ -29,98 +23,48 @@ pub fn rename_all_identifiers_with_observer(
         return Ok(String::new());
     }
 
-    let allocator = Allocator::default();
-    let parse_result = Parser::new(&allocator, source, SourceType::default()).parse();
-    if !parse_result.errors.is_empty() {
-        let msg = parse_result
-            .errors
+    // `LuaVersion::new()` enables every version compiled in (5.1–5.4 + LuaJIT).
+    // `with_cfxlua()` additionally accepts CitizenFX/FiveM extensions (`+=`-style
+    // compound assignment, `?.` safe navigation, `.a` table-constructor shorthand,
+    // `local x in y`) on top of that, so the parser accepts the union of all of
+    // their syntaxes.
+    let parsed = full_moon::parse_fallible(source, LuaVersion::new().with_cfxlua());
+    if !parsed.errors().is_empty() {
+        let msg = parsed
+            .errors()
             .iter()
-            .map(|e| e.message.to_string())
+            .map(|e| e.to_string())
             .collect::<Vec<_>>()
             .join("; ");
         return Err(RenameError::Parse(msg));
     }
-    let program = parse_result.program;
 
-    let semantic_result = SemanticBuilder::new().build(&program);
-    if !semantic_result.errors.is_empty() {
-        let msg = semantic_result
-            .errors
-            .iter()
-            .map(|e| e.message.to_string())
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(RenameError::Parse(msg));
-    }
-    let mut semantic = semantic_result.semantic;
+    let mut model = ScopeModel::build(parsed.ast(), source.len());
 
-    // Collect all symbols with their binding-scope span sizes for sorting.
-    let mut entries: Vec<(SymbolId, u32, u32)> = {
-        let scoping = semantic.scoping();
-        let nodes = semantic.nodes();
-        scoping
-            .symbol_ids()
-            .map(|sym_id| {
-                let decl_node_id = scoping.symbol_declaration(sym_id);
-                let sym_name = scoping.symbol_name(sym_id);
-                let span = scoping.symbol_span(sym_id);
-                let binding_scope = scoping.symbol_scope_id(sym_id);
-                // Walk ancestors to find the scope-introducing ancestor node for context.
-                let ctx_span = find_binding_ancestor_span(
-                    nodes,
-                    scoping,
-                    decl_node_id,
-                    sym_name,
-                    source,
-                    binding_scope,
-                );
-                let size = ctx_span.end.saturating_sub(ctx_span.start);
-                (sym_id, size, span.start)
-            })
-            .collect()
-    };
+    // Process largest scope first (so file-level names are chosen before the
+    // helpers inside them), ties broken by source position.
+    let mut order: Vec<usize> = (0..model.bindings.len())
+        .filter(|&id| model.bindings[id].renamable)
+        .collect();
+    order.sort_by_key(|&id| {
+        let binding = &model.bindings[id];
+        let span = model.scopes[binding.scope].span;
+        (std::cmp::Reverse(span.end - span.start), binding.decl.start)
+    });
 
-    // Sort: largest scope first; ties broken by source position (ascending).
-    entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
-    let total = entries.len();
+    let total = order.len();
     observer.identifiers_found(total);
 
-    let mut visited: HashSet<SymbolId> = HashSet::new();
-    let mut collisions = CollisionResolver::new(semantic.scoping(), semantic.nodes());
-
-    for (index, (sym_id, _, _)) in entries.iter().enumerate() {
+    for (index, binding_id) in order.into_iter().enumerate() {
         let current = index + 1;
-        let sym_id = *sym_id;
-        let original_name = {
-            let scoping = semantic.scoping();
-            scoping.symbol_name(sym_id).to_string()
-        };
-
-        // Each binding (symbol_id) is processed independently — shadowed
-        // variables with the same name in different scopes each get their
-        // own rename call.
-        if visited.contains(&sym_id) {
-            continue;
-        }
-        visited.insert(sym_id);
+        let original_name = model.bindings[binding_id].name.clone();
         observer.rename_started(current, total, &original_name);
 
-        // Compute surrounding code context.
         let surrounding = {
-            let scoping = semantic.scoping();
-            let nodes = semantic.nodes();
-            let decl_node_id = scoping.symbol_declaration(sym_id);
-            let sym_span = scoping.symbol_span(sym_id);
-            let binding_scope = scoping.symbol_scope_id(sym_id);
-            let ctx_span = find_binding_ancestor_span(
-                nodes,
-                scoping,
-                decl_node_id,
-                &original_name,
-                source,
-                binding_scope,
-            );
-            compute_context_window(source, sym_span, ctx_span, context_size)
+            let binding = &model.bindings[binding_id];
+            let scope_span = model.scopes[binding.scope].span;
+            let is_root = binding.scope == model.root();
+            compute_context_window(source, binding.decl, scope_span, is_root, context_size)
         };
 
         let new_name = renamer.rename(&original_name, &surrounding);
@@ -134,90 +78,75 @@ pub fn rename_all_identifiers_with_observer(
         // Apply safe-name normalization to get the base candidate.
         let base = super::safe_name::to_identifier(&new_name);
 
-        // Resolve collisions in this scope chain with a numeric suffix instead
-        // of the old underscore-prefix loop (which piled up `________index`
-        // when a local model returned the same generic word many times). If the
+        // Resolve collisions in this scope chain with a numeric suffix. If the
         // model's name already ends in a number, that number is incremented
-        // rather than a second one appended — so `...Iterator2` -> `...Iterator3`,
-        // never `...Iterator22`.
-        let scope_id = semantic.scoping().symbol_scope_id(sym_id);
-        let (safe, _collided) = super::collision::dedupe(&base, |cand| {
-            collisions.collides(semantic.scoping(), scope_id, sym_id, cand)
-        });
+        // rather than a second one appended — so `...Iterator2` ->
+        // `...Iterator3`, never `...Iterator22`.
+        let (safe, _collided) =
+            collision::dedupe(&base, |cand| collision::collides(&model, binding_id, cand));
 
-        // Rename in the symbol table (codegen reads from here via with_scoping),
-        // and keep the collision index in sync for later symbols.
-        collisions.commit(scope_id, &original_name, &safe);
-        let new_ident = Ident::from(allocator.alloc_str(&safe));
-        semantic
-            .scoping_mut()
-            .rename_symbol(sym_id, scope_id, new_ident);
+        // Record the new name so later collision checks see it.
+        model.bindings[binding_id].name = safe.clone();
         observer.rename_finished(current, total, &original_name, &safe);
     }
 
-    let scoping: Scoping = semantic.into_scoping();
-    let output = Codegen::new()
-        .with_scoping(Some(scoping))
-        .build(&program)
-        .code;
-
-    Ok(output)
+    Ok(emit(source, &model))
 }
 
-/// Find the span of the closest binding-introducing ancestor for a given declaration node.
-/// Mirrors v1's `closestSurroundingContextPath`: walk parents until we find the node whose
-/// outer bindings contain the symbol name (v1: `p.getOuterBindingIdentifiers()`), then
-/// return the span of *that node's scope's block* (v1: `p.scope.path`).
-///
-/// In oxc: `scoping.get_node_id(ancestor.scope_id())` gives the node that created the scope
-/// the ancestor lives in — that is the scope block node. We return its span.
-fn find_binding_ancestor_span(
-    nodes: &AstNodes<'_>,
-    scoping: &Scoping,
-    _decl_node_id: NodeId,
-    _sym_name: &str,
-    source: &str,
-    binding_scope_id: oxc_semantic::ScopeId,
-) -> oxc_span::Span {
-    use oxc_span::Span;
-
-    // The node that created the binding scope IS the scope block (v1's `scope.path`).
-    // Use scoping.get_node_id(binding_scope_id) to find it directly.
-    let scope_block_node_id = scoping.get_node_id(binding_scope_id);
-    let scope_block = nodes.get_node(scope_block_node_id);
-    let span = scope_block.kind().span();
-
-    // Program node (or empty span) starts at 0; Program.span may not cover trailing
-    // whitespace exactly, so fall back to the full source range.
-    if span.start == 0 {
-        return Span::new(0, source.len() as u32);
+/// Rewrite every reference of every renamed binding in the original source.
+/// Because we splice by byte span, formatting and comments are untouched.
+fn emit(source: &str, model: &ScopeModel) -> String {
+    let mut edits: Vec<(Span, &str)> = Vec::new();
+    for binding in &model.bindings {
+        if !binding.renamable {
+            continue;
+        }
+        let original = &source[binding.decl.start..binding.decl.end];
+        if original == binding.name {
+            continue;
+        }
+        for &span in &binding.refs {
+            edits.push((span, &binding.name));
+        }
     }
+    edits.sort_by_key(|(span, _)| span.start);
 
-    span
+    let mut out = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for (span, name) in edits {
+        out.push_str(&source[cursor..span.start]);
+        out.push_str(name);
+        cursor = span.end;
+    }
+    out.push_str(&source[cursor..]);
+    out
 }
 
-/// Compute the context window slice from source, given the binding-ancestor span and the
-/// symbol's own span. Mirrors v1's `scopeToString` truncation rules.
+/// Compute the context window slice from source, given the binding's scope span
+/// and the declaring token's span.
+///
+/// Small scopes are sent whole. For larger ones: a chunk-level (root) binding
+/// gets a window centred on the declaration; an inner scope gets its first
+/// `context_size` bytes (which start at the function/loop header, the most
+/// informative part).
 fn compute_context_window(
     source: &str,
-    sym_span: oxc_span::Span,
-    ctx_span: oxc_span::Span,
+    decl: Span,
+    ctx_span: Span,
+    is_root: bool,
     context_size: usize,
 ) -> String {
-    let ctx_start = floor_char_boundary(source, ctx_span.start as usize);
-    let ctx_end = ceil_char_boundary(source, ctx_span.end as usize);
+    let ctx_start = floor_char_boundary(source, ctx_span.start);
+    let ctx_end = ceil_char_boundary(source, ctx_span.end);
     let ctx_len = ctx_end.saturating_sub(ctx_start);
 
     if ctx_len <= context_size {
         return source[ctx_start..ctx_end].to_string();
     }
 
-    // Is this a Program-level (full source) context?
-    let is_program = ctx_start == 0 && ctx_end == source.len();
-
-    if is_program {
-        let sym_start = (sym_span.start as usize).min(source.len());
-        let sym_end = (sym_span.end as usize).min(source.len());
+    if is_root {
+        let sym_start = decl.start.min(source.len());
+        let sym_end = decl.end.min(source.len());
         let half = context_size / 2;
         if sym_end < half {
             let end = ceil_char_boundary(source, context_size);
@@ -231,7 +160,6 @@ fn compute_context_window(
         let end = ceil_char_boundary(source, sym_end + half);
         source[start..end].to_string()
     } else {
-        // Inner scope: return first context_size bytes of the scope slice.
         let end = ceil_char_boundary(source, ctx_start + context_size).min(ctx_end);
         source[ctx_start..end].to_string()
     }
@@ -258,111 +186,197 @@ fn ceil_char_boundary(source: &str, index: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
-    use super::super::test_dsl::{fixed, identity, mapping, queue, recording, scenario, suffix};
+    use super::super::test_dsl::{
+        fixed, identity, mapping, queue, recording, scenario, suffix, IdentityRenamer,
+    };
     use super::*;
 
     #[test]
     fn no_op_returns_same_code() {
-        scenario("const a = 1;")
+        scenario("local a = 1")
             .renamed_with(identity())
-            .yields("const a = 1;");
+            .yields("local a = 1");
     }
 
     #[test]
     fn no_op_returns_same_empty_code() {
-        let out = rename_all_identifiers("", &mut super::super::test_dsl::identity(), 500).unwrap();
+        let out = rename_all_identifiers("", &mut IdentityRenamer, 500).unwrap();
         assert_eq!(out, "");
     }
 
     #[test]
     fn renames_simple_variable() {
-        scenario("const a = 1;")
+        scenario("local a = 1")
             .renamed_with(fixed("b"))
-            .yields("const b = 1;");
+            .yields("local b = 1");
     }
 
     #[test]
-    fn renames_across_scopes() {
-        let out = scenario("const a = 1; (function () { a = 2; });")
+    fn renames_all_references() {
+        scenario("local a = 1\nprint(a, a + a)")
+            .renamed_with(fixed("count"))
+            .yields("local count = 1\nprint(count, count + count)");
+    }
+
+    #[test]
+    fn renames_upvalue_inside_closure() {
+        scenario("local a = 1\nlocal function f() a = 2 end")
             .with_context_size(500)
-            .renamed_with(fixed("b"));
-        assert!(
-            out.output().contains("const b = 1"),
-            "expected 'const b': {}",
-            out.output()
-        );
-        assert!(
-            out.output().contains("b = 2"),
-            "expected 'b = 2': {}",
-            out.output()
-        );
-        assert!(
-            !out.output().contains('a'),
-            "should have no 'a' left: {}",
-            out.output()
-        );
+            .renamed_with(mapping(&[("a", "b")]))
+            .yields("local b = 1\nlocal function f() b = 2 end");
     }
 
     #[test]
     fn renames_two_scopes_largest_first() {
-        let out = scenario("const a = 1; (function () { const b = 2; });")
+        scenario("local a = 1\nlocal function f() local b = 2 end")
             .with_context_size(500)
-            .renamed_with(queue(&["c", "d"]));
-        assert!(
-            out.output().contains("const c = 1"),
-            "expected c: {}",
-            out.output()
-        );
-        assert!(
-            out.output().contains("const d = 2"),
-            "expected d: {}",
-            out.output()
-        );
+            .renamed_with(queue(&["c", "g", "d"]))
+            .yields("local c = 1\nlocal function g() local d = 2 end");
     }
 
     #[test]
-    fn renames_shadowed_variables() {
-        // Two independent bindings named 'a' — each gets its own rename call (symbol_id keyed).
-        let out = scenario("const a = 1; (function () { const a = 2; });")
+    fn renames_shadowed_variables_independently() {
+        // Two distinct bindings named `a` — each gets its own rename call.
+        scenario("local a = 1\nlocal function f() local a = 2 return a end")
             .with_context_size(500)
-            .renamed_with(queue(&["b", "c"]));
-        assert!(
-            out.output().contains("const b = 1"),
-            "expected outer b: {}",
-            out.output()
-        );
-        assert!(
-            out.output().contains("const c = 2"),
-            "expected inner c: {}",
-            out.output()
-        );
+            .renamed_with(queue(&["b", "f", "c"]))
+            .yields("local b = 1\nlocal function f() local c = 2 return c end");
     }
 
     #[test]
-    fn does_not_rename_class_methods() {
-        let out = scenario("class Foo { bar() {} }")
-            .with_context_size(500)
-            .renamed_with(suffix("_changed"));
-        assert!(
-            out.output().contains("Foo_changed"),
-            "expected Foo_changed: {}",
-            out.output()
-        );
-        assert!(
-            out.output().contains("bar"),
-            "expected bar unchanged: {}",
-            out.output()
-        );
-        assert!(
-            !out.output().contains("bar_changed"),
-            "bar should not be renamed: {}",
-            out.output()
-        );
+    fn renames_parameters() {
+        scenario("local function f(a, b) return a + b end")
+            .renamed_with(mapping(&[("a", "left"), ("b", "right")]))
+            .yields("local function f(left, right) return left + right end");
     }
 
-    const SCOPE_INPUT: &str = "const a = 1;\nfunction foo() {\n  const b = 2;\n\n  class Bar {\n    baz = 3;\n    hello() {\n      const y = 123;\n    }\n  }\n};\n";
+    #[test]
+    fn renames_loop_variables() {
+        scenario("for i = 1, 3 do for k, v in pairs(t) do print(i, k, v) end end")
+            .renamed_with(mapping(&[("i", "index"), ("k", "key"), ("v", "value")]))
+            .yields(
+                "for index = 1, 3 do for key, value in pairs(t) do print(index, key, value) end end",
+            );
+    }
+
+    #[test]
+    fn does_not_rename_globals() {
+        scenario("function foo() return bar end\nprint(foo())")
+            .renamed_with(suffix("_changed"))
+            .yields("function foo() return bar end\nprint(foo())");
+    }
+
+    #[test]
+    fn does_not_rename_fields_or_methods() {
+        scenario("local t = { foo = 1 }\nt.foo = 2\nt:bar()\nprint(t.foo)")
+            .renamed_with(suffix("_changed"))
+            .yields(
+                "local t_changed = { foo = 1 }\nt_changed.foo = 2\nt_changed:bar()\nprint(t_changed.foo)",
+            );
+    }
+
+    #[test]
+    fn does_not_rename_implicit_self() {
+        scenario("local T = {}\nfunction T:m(a) return self, a end")
+            .renamed_with(suffix("_x"))
+            .yields("local T_x = {}\nfunction T_x:m(a_x) return self, a_x end");
+    }
+
+    #[test]
+    fn renames_local_function_recursively() {
+        scenario("local function f(n) if n == 0 then return 1 end return n * f(n - 1) end")
+            .renamed_with(mapping(&[("f", "factorial"), ("n", "count")]))
+            .yields(
+                "local function factorial(count) if count == 0 then return 1 end return count * factorial(count - 1) end",
+            );
+    }
+
+    #[test]
+    fn preserves_comments_and_whitespace() {
+        scenario("-- header\nlocal  a   = 1 --[[ trailing ]]\n\n\nprint( a )\n")
+            .renamed_with(fixed("b"))
+            .yields("-- header\nlocal  b   = 1 --[[ trailing ]]\n\n\nprint( b )");
+    }
+
+    #[test]
+    fn normalizes_unsafe_suggestions() {
+        scenario("local a = 1")
+            .renamed_with(fixed("end"))
+            .yields("local _end = 1");
+    }
+
+    #[test]
+    fn deduplicates_same_scope_collision() {
+        scenario("local a, b = 1, 2")
+            .renamed_with(fixed("value"))
+            .yields("local value, value2 = 1, 2");
+    }
+
+    #[test]
+    fn deduplicates_against_global_used_in_scope() {
+        scenario("local a = 1\nprint(a)")
+            .renamed_with(fixed("print"))
+            .yields("local print2 = 1\nprint(print2)");
+    }
+
+    #[test]
+    fn does_not_capture_outer_upvalue() {
+        scenario("local x = 1\nlocal function f() local a = 2 return a + x end")
+            .renamed_with(mapping(&[("a", "x")]))
+            .yields("local x = 1\nlocal function f() local x2 = 2 return x2 + x end");
+    }
+
+    #[test]
+    fn outer_rename_avoids_inner_binding() {
+        scenario("local a = 1\nlocal function f() local x = 2 return a end")
+            .renamed_with(mapping(&[("a", "x")]))
+            .yields("local x2 = 1\nlocal function f() local x = 2 return x2 end");
+    }
+
+    #[test]
+    fn sibling_scopes_may_share_names() {
+        scenario("local function f() local a = 1 return a end\nlocal function g() local b = 2 return b end")
+            .renamed_with(mapping(&[("a", "value"), ("b", "value")]))
+            .yields("local function f() local value = 1 return value end\nlocal function g() local value = 2 return value end");
+    }
+
+    #[test]
+    fn increments_existing_numeric_suffix() {
+        scenario("local a, b = 1, 2")
+            .renamed_with(fixed("item3"))
+            .yields("local item3, item4 = 1, 2");
+    }
+
+    #[test]
+    fn parse_error_is_reported() {
+        let err = rename_all_identifiers("local = ", &mut IdentityRenamer, 500).unwrap_err();
+        let RenameError::Parse(msg) = err;
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn accepts_lua54_syntax() {
+        scenario("local x <const> = 1\nlocal y = x // 2")
+            .renamed_with(mapping(&[("x", "limit")]))
+            .yields("local limit <const> = 1\nlocal y = limit // 2");
+    }
+
+    #[test]
+    fn accepts_goto_and_labels() {
+        scenario("local n = 0\n::top::\nn = n + 1\nif n < 3 then goto top end")
+            .renamed_with(fixed("counter"))
+            .yields("local counter = 0\n::top::\ncounter = counter + 1\nif counter < 3 then goto top end");
+    }
+
+    #[test]
+    fn source_round_trips_when_identity() {
+        scenario(
+            "local M = {}\n\nfunction M.new(x, y)\n  local self = setmetatable({}, M)\n  self.x, self.y = x, y\n  return self\nend\n\nreturn M\n",
+        )
+        .parses_unchanged();
+    }
+
+    const SCOPE_INPUT: &str = "local a = 1\nlocal function foo()\n  local b = 2\n  local function bar()\n    local y = 123\n  end\nend\n";
 
     #[test]
     fn passes_surrounding_scope_argument() {
@@ -383,455 +397,197 @@ mod tests {
         let (_, log) = scenario(SCOPE_INPUT)
             .with_context_size(500)
             .with_recording(recording("_x"));
-        assert_eq!(log.call_names(), &["a", "foo", "b", "Bar", "y"]);
+        assert_eq!(log.call_names(), &["a", "foo", "b", "bar", "y"]);
     }
 
     #[test]
-    fn scope_for_inner_binding_contains_enclosing_function() {
+    fn scope_for_inner_binding_is_enclosing_function() {
         let (_, log) = scenario(SCOPE_INPUT)
             .with_context_size(500)
             .with_recording(recording("_x"));
-        assert!(log.scope_for("b").contains("const b = 2"));
-        assert!(log.scope_for("b").contains("foo"));
+        let scope = log.scope_for("b");
+        assert!(scope.contains("local b = 2"), "scope: {scope}");
+        assert!(scope.starts_with("()"), "scope: {scope}");
+        assert!(!scope.contains("local a = 1"), "scope: {scope}");
+    }
+
+    #[test]
+    fn scope_for_root_binding_is_whole_file() {
+        let (_, log) = scenario(SCOPE_INPUT)
+            .with_context_size(500)
+            .with_recording(recording("_x"));
+        assert_eq!(log.scope_for("a"), SCOPE_INPUT);
     }
 
     #[test]
     fn scopes_renamed_largest_to_smallest() {
-        let input = "function foo() { function bar() { function baz() { const qux = 1; } } }";
+        let input =
+            "local function foo() local function bar() local function baz() local qux = 1 end end end";
         let (_, log) = scenario(input)
             .with_context_size(500)
             .with_recording(recording("_x"));
-        let names: Vec<&str> = log.0.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(
-            names,
-            &["foo", "bar", "baz", "qux"],
-            "expected largest-first: {names:?}"
-        );
+        assert_eq!(log.call_names(), &["foo", "bar", "baz", "qux"]);
     }
 
     #[test]
-    fn each_variable_renamed_only_once() {
-        let input = "function splitString(a, e, t, n, r, i) { return a + e + t + n + r + i; }";
+    fn context_truncated_for_inner_scope() {
+        let input = "local function f(a)\n  local b = a\n  return b\nend\n";
         let (_, log) = scenario(input)
-            .with_context_size(500)
+            .with_context_size(10)
             .with_recording(recording("_x"));
-        let names: Vec<&str> = log.0.iter().map(|(n, _)| n.as_str()).collect();
-        assert!(
-            names.contains(&"splitString"),
-            "expected splitString: {names:?}"
-        );
-        let unique: HashSet<_> = names.iter().collect();
-        assert_eq!(
-            unique.len(),
-            names.len(),
-            "duplicate names in calls: {names:?}"
-        );
+        assert_eq!(log.scope_for("a"), "(a)\n  loca");
     }
 
     #[test]
-    fn scope_is_from_declaration_site() {
-        let input = "function foo() { if (true) { if (true) { let a = 1; a.toString(); } } }";
+    fn context_for_root_binding_is_centred_on_declaration() {
+        let input = "local a = 1\nlocal b = 2\nlocal c = 3\nlocal d = 4\nlocal e = 5\n";
         let (_, log) = scenario(input)
-            .with_context_size(200)
+            .with_context_size(12)
             .with_recording(recording("_x"));
-        let a_scope = log
-            .0
-            .iter()
-            .find(|(n, _)| n == "a")
-            .map(|(_, s)| s.as_str())
-            .unwrap_or("");
-        assert!(
-            a_scope.contains("let a = 1"),
-            "scope for 'a' should contain declaration: {a_scope}"
-        );
-        assert!(
-            a_scope.contains("a.toString()"),
-            "scope for 'a' should contain usage: {a_scope}"
-        );
+        // `a` sits near the start: window is [decl-6, decl+1+6).
+        assert_eq!(log.scope_for("a"), "local a = 1\nl");
+        // `e` sits at the end: window is clamped to the last 12 bytes.
+        assert_eq!(log.scope_for("e"), "local e = 5\n");
+        let mid = log.scope_for("c");
+        assert!(mid.contains("local c"), "mid: {mid}");
+        assert_eq!(mid.len(), 13, "mid: {mid:?}");
     }
 
     #[test]
-    fn surrounding_code_for_program_level_binding_is_full_source() {
-        let input = "const x = 1;";
+    fn context_window_respects_utf8_boundaries() {
+        let input = "local a = \"ééééééééééééééé\"\nlocal b = 2\n";
         let (_, log) = scenario(input)
+            .with_context_size(15)
+            .with_recording(recording("_x"));
+        // Must not panic slicing inside a multi-byte char.
+        assert!(!log.scope_for("a").is_empty());
+    }
+
+    #[test]
+    fn floor_and_ceil_char_boundary_clamp() {
+        assert_eq!(floor_char_boundary("abc", 10), 3);
+        assert_eq!(ceil_char_boundary("abc", 10), 3);
+        assert_eq!(floor_char_boundary("é", 1), 0);
+        assert_eq!(ceil_char_boundary("é", 1), 2);
+    }
+
+    #[test]
+    fn varargs_are_ignored_not_renamed() {
+        scenario("local function f(...) local t = {...} return t end")
             .with_context_size(500)
-            .with_recording(recording("_y"));
-        let scope = log
-            .0
-            .iter()
-            .find(|(n, _)| n == "x")
-            .map(|(_, s)| s.as_str())
-            .expect("expected call for 'x'");
-        assert_eq!(
-            scope, input,
-            "surrounding_code for top-level binding should be the full source"
-        );
+            .renamed_with(mapping(&[("f", "collect"), ("t", "items")]))
+            .yields("local function collect(...) local items = {...} return items end");
     }
 
     #[test]
-    fn surrounding_code_for_inner_binding_excludes_outer_code() {
-        let input = "const outer = 99; function fn1() { const inner = 1; }";
-        let (_, log) = scenario(input)
+    fn vararg_forwarding_call() {
+        scenario("local function f(...) return print(...) end")
+            .renamed_with(fixed("wrapper"))
+            .yields("local function wrapper(...) return print(...) end");
+    }
+
+    #[test]
+    fn iife_anonymous_function_call() {
+        scenario("local x = (function() local y = 1 return y end)()")
             .with_context_size(500)
-            .with_recording(recording("_y"));
-        let inner_scope = log
-            .0
-            .iter()
-            .find(|(n, _)| n == "inner")
-            .map(|(_, s)| s.as_str())
-            .expect("expected call for 'inner'");
-        assert!(
-            inner_scope.contains("const inner = 1"),
-            "inner scope should contain its own declaration: {inner_scope}"
-        );
-        assert!(
-            !inner_scope.contains("const outer"),
-            "inner scope should NOT contain outer variable: {inner_scope}"
-        );
+            .renamed_with(mapping(&[("x", "result"), ("y", "one")]))
+            .yields("local result = (function() local one = 1 return one end)()");
     }
 
     #[test]
-    fn surrounding_code_is_truncated_by_context_size() {
-        let input = "function big() { const x = 1; const y = 2; const z = 3; const w = 4; }";
-        let (_, log) = scenario(input)
-            .with_context_size(20)
-            .with_recording(recording("_y"));
-        let x_scope = log
-            .0
-            .iter()
-            .find(|(n, _)| n == "x")
-            .map(|(_, s)| s.as_str())
-            .expect("expected call for 'x'");
-        assert!(
-            x_scope.len() < input.len(),
-            "surrounding_code should be truncated, got {} bytes: {x_scope:?}",
-            x_scope.len()
-        );
-        assert!(
-            !x_scope.contains("const w = 4"),
-            "truncated surrounding_code should not contain late declarations: {x_scope:?}"
-        );
+    fn lua54_close_attribute() {
+        scenario("local x <close> = acquire()")
+            .renamed_with(fixed("resource"))
+            .yields("local resource <close> = acquire()");
     }
 
     #[test]
-    fn does_not_rename_object_properties() {
-        let out = scenario("const c = 2; const a = { b: c }; a.b;")
+    fn bracket_index_assignment_array_push_idiom() {
+        scenario("local n = {} n[#n+1] = 1")
             .with_context_size(500)
-            .renamed_with(queue(&["d", "e"]));
-        assert!(
-            out.output().contains("b:") || out.output().contains("b :"),
-            "property b should survive: {}",
-            out.output()
-        );
-        assert!(
-            !out.output().contains("const c"),
-            "c should be renamed: {}",
-            out.output()
-        );
-        assert!(
-            !out.output().contains("const a"),
-            "a should be renamed: {}",
-            out.output()
-        );
+            .renamed_with(fixed("items"))
+            .yields("local items = {} items[#items+1] = 1");
     }
 
     #[test]
-    fn handles_invalid_identifiers() {
-        scenario("const a = 1;")
+    fn deep_dotted_function_declaration_only_renames_base() {
+        scenario("local a = {} a.b = {} function a.b.c() end")
             .with_context_size(500)
-            .renamed_with(fixed("this.kLength"))
-            .yields("const thisKLength = 1;");
+            .renamed_with(fixed("root"))
+            .yields("local root = {} root.b = {} function root.b.c() end");
+    }
+
+    // --- CFX Lua (FiveM) extensions ---
+
+    #[test]
+    fn cfx_compound_assignment_renames_variable() {
+        scenario("local x = 1 x += 1")
+            .renamed_with(fixed("counter"))
+            .yields("local counter = 1 counter += 1");
     }
 
     #[test]
-    fn handles_space_in_identifier() {
-        scenario("const a = 1;")
+    fn cfx_compound_assignment_bitwise_operators() {
+        scenario("local x = 0 x &= 1 x |= 2 x <<= 3 x >>= 4")
+            .renamed_with(fixed("flags"))
+            .yields("local flags = 0 flags &= 1 flags |= 2 flags <<= 3 flags >>= 4");
+    }
+
+    #[test]
+    fn cfx_compound_assignment_on_indexed_variable() {
+        scenario("local t = {x = 1} t.x += 1")
+            .renamed_with(fixed("state"))
+            .yields("local state = {x = 1} state.x += 1");
+    }
+
+    #[test]
+    fn cfx_safe_navigation_field_access_not_renamed() {
+        scenario("local t = {} local r = t?.a?.b")
             .with_context_size(500)
-            .renamed_with(fixed("foo bar"))
-            .yields("const fooBar = 1;");
+            .renamed_with(mapping(&[("t", "obj"), ("r", "result")]))
+            .yields("local obj = {} local result = obj?.a?.b");
     }
 
     #[test]
-    fn handles_reserved_identifiers() {
-        let out = scenario("const a = 1;")
+    fn cfx_set_constructor_shorthand_field_not_a_variable() {
+        // `{ .a }` means `{ a = true }` — `a` is a field name, not a reference
+        // to the local variable also named `a`, so renaming that local must
+        // leave `.a` untouched.
+        scenario("local a = 1 local t = { .a }")
             .with_context_size(500)
-            .renamed_with(fixed("static"));
-        assert!(
-            out.output().contains("_static"),
-            "expected _static: {}",
-            out.output()
-        );
+            .renamed_with(mapping(&[("a", "value")]))
+            .yields("local value = 1 local t = { .a }");
     }
 
     #[test]
-    fn does_not_capture_unresolved_browser_global() {
-        scenario("const a = 1; crypto.getRandomValues(new Uint8Array(a));")
+    fn cfx_local_in_unpacking_sugar() {
+        // `local a, b in t` unpacks named fields (`t.a`, `t.b`) rather than
+        // assigning `t` itself; structurally it's still a `LocalAssignment`
+        // with `t` as the sole expression, which our walker already handles
+        // generically — declare the new locals, reference `t` once.
+        scenario("local player = get_player() local id, name in player print(id, name)")
             .with_context_size(500)
-            .renamed_with(fixed("crypto"))
-            .yields("const crypto2 = 1;\ncrypto.getRandomValues(new Uint8Array(crypto2));");
+            .renamed_with(mapping(&[("player", "src"), ("id", "player_id"), ("name", "player_name")]))
+            .yields(
+                "local src = get_player() local player_id, player_name in src print(player_id, player_name)",
+            );
     }
 
     #[test]
-    fn does_not_capture_unresolved_host_global() {
-        scenario("const a = 1; hostApi.consume(a);")
+    fn cfx_backtick_jenkins_hash_string_untouched() {
+        // Backtick-quoted strings are Jenkins-hashed at parse time by CFX Lua;
+        // they're a string literal to us, not an identifier — must survive
+        // renaming byte-for-byte.
+        scenario("local h = `some_event_name`")
+            .renamed_with(fixed("hash"))
+            .yields("local hash = `some_event_name`");
+    }
+
+    #[test]
+    fn cfx_c_style_block_comment_preserved() {
+        scenario("local a = 1 /* keep this comment */ local b = 2")
             .with_context_size(500)
-            .renamed_with(fixed("hostApi"))
-            .yields("const hostApi2 = 1;\nhostApi.consume(hostApi2);");
-    }
-
-    #[test]
-    fn does_not_capture_unresolved_global_in_descendant_scope() {
-        let out = scenario("const a = 1; function f() { crypto.getRandomValues(a); }")
-            .with_context_size(500)
-            .renamed_with(mapping(&[("a", "crypto")]));
-        assert!(
-            out.output().contains("const crypto2 = 1"),
-            "outer binding must not capture a descendant global reference: {}",
-            out.output()
-        );
-    }
-
-    #[test]
-    fn sibling_scope_may_reuse_unresolved_global_name() {
-        let out =
-            scenario("function f() { hostApi.consume(); } function g() { const a = 1; return a; }")
-                .with_context_size(500)
-                .renamed_with(mapping(&[("a", "hostApi")]));
-        assert!(
-            out.output().contains("const hostApi = 1"),
-            "sibling global reference should not force a suffix: {}",
-            out.output()
-        );
-        assert!(
-            !out.output().contains("hostApi2"),
-            "sibling scopes cannot capture each other: {}",
-            out.output()
-        );
-    }
-
-    #[test]
-    fn handles_multiple_same_name() {
-        let out = scenario("const a = 1; const b = 1;")
-            .with_context_size(500)
-            .renamed_with(fixed("foo"));
-        assert!(
-            out.output().contains("const foo = 1"),
-            "expected foo: {}",
-            out.output()
-        );
-        assert!(
-            out.output().contains("const foo2 = 1"),
-            "expected numeric-suffixed foo2: {}",
-            out.output()
-        );
-    }
-
-    #[test]
-    fn handles_multiple_props_same_name() {
-        let out = scenario("const foo = 1; const bar = 2;")
-            .with_context_size(500)
-            .renamed_with(fixed("bar"));
-        assert!(
-            out.output().contains("bar2"),
-            "expected bar2 for renamed foo: {}",
-            out.output()
-        );
-        assert!(
-            out.output().contains("const bar = 2"),
-            "expected bar to stay bar: {}",
-            out.output()
-        );
-    }
-
-    // --- scope-aware collision handling ---
-
-    /// Counts occurrences of `name` as a whole identifier token (bounded by
-    /// non-identifier characters), so `count_ident(s, "shared")` does not match
-    /// inside `_shared`, and `count_ident(s, "_shared")` does not match inside
-    /// `__shared`.
-    fn count_ident(hay: &str, name: &str) -> usize {
-        let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
-        let bytes = hay.as_bytes();
-        let mut n = 0;
-        let mut start = 0;
-        while let Some(pos) = hay[start..].find(name) {
-            let i = start + pos;
-            let before_ok = i == 0 || !is_word(hay[..i].chars().next_back().unwrap());
-            let after = i + name.len();
-            let after_ok = after >= bytes.len() || !is_word(hay[after..].chars().next().unwrap());
-            if before_ok && after_ok {
-                n += 1;
-            }
-            start = i + name.len();
-        }
-        n
-    }
-
-    #[test]
-    fn sibling_scopes_may_reuse_the_same_name_without_suffix() {
-        // Two locals the model names identically, in disjoint sibling functions.
-        // JS allows this, so neither should accrue a suffix.
-        let out = scenario("function f() { var a = 1; } function g() { var b = 2; }")
-            .with_context_size(500)
-            .renamed_with(mapping(&[("a", "shared"), ("b", "shared")]));
-        let o = out.output();
-        assert_eq!(
-            count_ident(o, "shared"),
-            2,
-            "both sibling locals should be bare `shared`: {o}"
-        );
-        assert!(
-            !o.contains("shared2"),
-            "sibling reuse must not add a numeric suffix: {o}"
-        );
-    }
-
-    #[test]
-    fn same_scope_conflict_gets_numeric_suffix() {
-        // Two bindings in the SAME scope cannot share a name; the second becomes
-        // `shared2` rather than `_shared`.
-        let out = scenario("const a = 1; const b = 2;")
-            .with_context_size(500)
-            .renamed_with(mapping(&[("a", "shared"), ("b", "shared")]));
-        let o = out.output();
-        assert_eq!(count_ident(o, "shared"), 1, "one bare `shared`: {o}");
-        assert_eq!(count_ident(o, "shared2"), 1, "one `shared2`: {o}");
-        assert!(!o.contains("shared3"), "only two colliding names: {o}");
-        assert!(!o.contains("_shared"), "must not underscore-prefix: {o}");
-    }
-
-    #[test]
-    fn shadowing_conflict_across_nesting_gets_numeric_suffix() {
-        // An outer binding and a nested binding cannot both be `shared`, or a
-        // reference would be captured. Exactly one becomes `shared2`, regardless
-        // of traversal order.
-        let out = scenario("var a = 1; function f() { var b = 2; return a; }")
-            .with_context_size(500)
-            .renamed_with(mapping(&[("a", "shared"), ("b", "shared")]));
-        let o = out.output();
-        assert!(o.contains("shared2"), "one conflict becomes `shared2`: {o}");
-        assert!(!o.contains("shared3"), "only two colliding names: {o}");
-        assert!(!o.contains("_shared"), "must not underscore-prefix: {o}");
-    }
-
-    #[test]
-    fn no_suffix_pileup_across_many_disjoint_scopes() {
-        // Regression for the `________index` pileup: many disjoint scopes each
-        // naming their local `index` must all stay bare `index`.
-        let mut src = String::new();
-        for i in 0..10 {
-            src.push_str(&format!("function f{i}() {{ var v{i} = {i}; }} "));
-        }
-        let pairs: Vec<(String, String)> = (0..10)
-            .map(|i| (format!("v{i}"), "index".to_string()))
-            .collect();
-        let pair_refs: Vec<(&str, &str)> = pairs
-            .iter()
-            .map(|(a, b)| (a.as_str(), b.as_str()))
-            .collect();
-        let out = scenario(&src)
-            .with_context_size(500)
-            .renamed_with(mapping(&pair_refs));
-        let o = out.output();
-        assert_eq!(
-            count_ident(o, "index"),
-            10,
-            "all ten locals should be bare: {o}"
-        );
-        assert!(!o.contains("index2"), "no numeric-suffix pileup: {o}");
-    }
-
-    #[test]
-    fn descendant_capture_is_prevented_with_numeric_suffix() {
-        // Renaming the OUTER `a` to a name already bound in a nested scope would
-        // capture the `return a` reference (it would resolve to the inner `x`).
-        // The descendant check must force a suffix even though `find_binding`
-        // (which only walks *up*) can't see the nested binding. Outer becomes
-        // `x2`, and the inner `x` and the outer reference stay correct.
-        let out = scenario("var a = 1; function f() { var x = 2; return a + x; }")
-            .with_context_size(500)
-            .renamed_with(mapping(&[("a", "x")]));
-        let o = out.output();
-        assert_eq!(
-            count_ident(o, "x2"),
-            2,
-            "outer decl + its reference should both be `x2`: {o}"
-        );
-        assert_eq!(
-            count_ident(o, "x"),
-            2,
-            "inner decl + its reference should stay bare `x`: {o}"
-        );
-        assert!(!o.contains("x3"), "only one conflict: {o}");
-    }
-
-    #[test]
-    fn same_scope_numeric_names_increment_not_append() {
-        // Three same-scope bindings the model all names `item2`: the suffix must
-        // increment (`item2` -> `item3` -> `item4`), never append a second digit
-        // (`item22`) or fall back to an underscore.
-        let out = scenario("const a = 1; const b = 2; const c = 3;")
-            .with_context_size(500)
-            .renamed_with(mapping(&[("a", "item2"), ("b", "item2"), ("c", "item2")]));
-        let o = out.output();
-        assert_eq!(count_ident(o, "item2"), 1, "one `item2`: {o}");
-        assert_eq!(count_ident(o, "item3"), 1, "one `item3`: {o}");
-        assert_eq!(count_ident(o, "item4"), 1, "one `item4`: {o}");
-        assert!(!o.contains("item22"), "must increment, not append: {o}");
-        assert!(!o.contains("_item"), "must not underscore-prefix: {o}");
-    }
-
-    #[test]
-    fn does_not_crash_on_arguments_assign() {
-        let out = scenario("function foo() { arguments = '??'; }")
-            .with_context_size(500)
-            .renamed_with(fixed("foobar"));
-        assert!(
-            out.output().contains("foobar"),
-            "expected foobar: {}",
-            out.output()
-        );
-    }
-
-    #[test]
-    fn unicode_identifier() {
-        let out = scenario("const café = 1;")
-            .with_context_size(500)
-            .renamed_with(fixed("x"));
-        assert!(
-            out.output().contains("const x = 1"),
-            "expected x: {}",
-            out.output()
-        );
-    }
-
-    #[test]
-    fn truncation_window_falls_on_multibyte_char_boundary() {
-        // Cyrillic 'о' is 2 bytes (0xD0 0xBE). With a long stretch of these
-        // around the symbol, the truncation window edges land mid-character
-        // unless we snap them to UTF-8 char boundaries.
-        // Regression test for https://github.com/jehna/humanify/issues/747.
-        let pad = "о".repeat(500);
-        let input = format!("/* {pad} */ const x = 1; /* {pad} */");
-        let out = rename_all_identifiers(&input, &mut identity(), 50).unwrap();
-        assert!(out.contains("const x = 1"), "expected x unchanged: {out}");
-    }
-
-    #[test]
-    fn private_class_field() {
-        let input = "class A { #x = 1; m() { return this.#x; } }";
-        let out = scenario(input)
-            .with_context_size(500)
-            .renamed_with(identity());
-        assert!(
-            out.output().contains('A'),
-            "expected class A in output: {}",
-            out.output()
-        );
-        assert!(
-            out.output().contains("#x"),
-            "expected #x in output: {}",
-            out.output()
-        );
+            .renamed_with(mapping(&[("a", "first"), ("b", "second")]))
+            .yields("local first = 1 /* keep this comment */ local second = 2");
     }
 }

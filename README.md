@@ -1,12 +1,13 @@
-# humanify
+# humanify-lua
 
-> Un-minify JavaScript code using LLMs ("AI")
+> Un-minify Lua code using LLMs ("AI")
 
 This tool uses large language models (like ChatGPT, Claude, Gemini, and
-locally-hosted Ollama models) to unminify and rename minified JavaScript code.
-The LLM only suggests new identifier names; the heavy lifting is done by
-[oxc](https://github.com/oxc-project/oxc) at the AST level so the rewritten code
-remains structurally identical to the input.
+locally-hosted Ollama models) to unminify and rename minified or obfuscated Lua
+code. The LLM only suggests new identifier names; the heavy lifting is done by
+[full_moon](https://github.com/Kampfkarren/full-moon), a lossless Lua parser,
+so the rewritten code is byte-identical to the input except for the renamed
+identifiers — humanify does not reformat or reindent your code.
 
 ## Version 3 is out! 🎉
 
@@ -15,66 +16,49 @@ v3 highlights compared to v2:
 * **Single static binary:** (Rust) — grab a binary from Releases. No Node, no
   npm, no Python.
 * **Unix-style I/O**: read from stdin or a file, write to stdout or `-o <file>`.
-  Combine easily with a deobfuscator like [webcrack][webcrack].
 * **New providers:** Ollama (local), Anthropic and OpenRouter.
 
 Check out the [v3 PR](https://github.com/jehna/humanify/pull/744) for more info.
 
-[webcrack]:https://github.com/j4k0xb/webcrack
-
-### ➡️ Check out the [introduction blog post][blogpost] for in-depth explanation!
-
-[blogpost]: https://thejunkland.com/blog/using-llms-to-reverse-javascript-minification
-
 ## Example
 
-Given the following minified code in `splitstring.min.js`:
+Given the following minified code in `splitstring.min.lua`:
 
-```javascript
-function a(e,t){var n=[];var r=e.length;var i=0;for(;i<r;i+=t){if(i+t<r){n.push(e.substring(i,i+t))}else{n.push(e.substring(i,r))}}return n}
+```lua
+local function a(e,t)local n={}local r=#e local i=1 while i<=r do local j=i+t-1 if j>r then j=r end table.insert(n,e:sub(i,j)) i=i+t end return n end
 ```
 
 Run:
 
 ```shell
-humanify openai splitstring.min.js -o splitstring.js
+humanify-lua openai splitstring.min.lua -o splitstring.lua
 ```
 
-Result (`splitstring.js`):
+Result (`splitstring.lua`):
 
-```javascript
-function splitString(inputString, chunkSize) {
-  var chunks = [];
-  var stringLength = inputString.length;
-  var startIndex = 0;
-  for (; startIndex < stringLength; startIndex += chunkSize) {
-    if (startIndex + chunkSize < stringLength) {
-      chunks.push(inputString.substring(startIndex, startIndex + chunkSize));
-    } else {
-      chunks.push(inputString.substring(startIndex, stringLength));
-    }
-  }
-  return chunks;
-}
+```lua
+local function split_string(input_string,chunk_size)local chunks={}local length=#input_string local start_index=1 while start_index<=length do local end_index=start_index+chunk_size-1 if end_index>length then end_index=length end table.insert(chunks,input_string:sub(start_index,end_index)) start_index=start_index+chunk_size end return chunks end
+```
+
+Only the identifiers changed — humanify never reflows or reindents your code,
+so if you want it pretty-printed too, pipe the result through a Lua formatter
+such as [StyLua](https://github.com/JohnnyMorganz/StyLua):
+
+```shell
+humanify-lua openai splitstring.min.lua | stylua - -o splitstring.lua
 ```
 
 You can also pipe via stdin:
 
 ```shell
-cat splitstring.min.js | humanify openai - > splitstring.js
-```
-
-To unbundle Webpack output first, pipe through `npx webcrack`:
-
-```shell
-npx webcrack < bundle.min.js | humanify openai - -o bundle.js
+cat splitstring.min.lua | humanify-lua openai - > splitstring.lua
 ```
 
 ## Note on token usage
 
 🚨 **NOTE:** 🚨
 
-humanify makes one LLM call per identifier in your code. For ChatGPT-class APIs
+humanify-lua makes one LLM call per identifier in your code. For ChatGPT-class APIs
 the cost roughly scales with the number of identifiers and the surrounding
 context window (default 500 chars per call). A medium minified file (~500
 identifiers) typically costs in the range of $0.10–$1.00 with OpenAI's small
@@ -84,10 +68,10 @@ models.
 For a rough character-count estimate of OpenAI mode:
 
 ```shell
-echo "$((2 * $(wc -c < yourscript.min.js)))"
+echo "$((2 * $(wc -c < yourscript.min.lua)))"
 ```
 
-Using `humanify ollama` is free but slower; quality depends on your local model.
+Using `humanify-lua ollama` is free but slower; quality depends on your local model.
 Free OpenRouter models (e.g. `qwen/qwen3-coder:free`) can help with your budget,
 but expect them to be heaviy rate limited.
 
@@ -95,27 +79,27 @@ but expect them to be heaviy rate limited.
 
 ### Installation
 
-The preferred way to install humanify is to download a pre-built binary from the
+The preferred way to install humanify-lua is to download a pre-built binary from the
 [latest release](https://github.com/jehna/humanify/releases/latest).
 
 ```shell
 # macOS (Apple Silicon)
-curl -L https://github.com/jehna/humanify/releases/latest/download/humanify-aarch64-apple-darwin.tar.gz | tar xz
-sudo mv humanify /usr/local/bin/
+curl -L https://github.com/jehna/humanify/releases/latest/download/humanify-lua-aarch64-apple-darwin.tar.gz | tar xz
+sudo mv humanify-lua /usr/local/bin/
 
 # macOS (Intel)
-curl -L https://github.com/jehna/humanify/releases/latest/download/humanify-x86_64-apple-darwin.tar.gz | tar xz
-sudo mv humanify /usr/local/bin/
+curl -L https://github.com/jehna/humanify/releases/latest/download/humanify-lua-x86_64-apple-darwin.tar.gz | tar xz
+sudo mv humanify-lua /usr/local/bin/
 
 # Linux (x86_64)
-curl -L https://github.com/jehna/humanify/releases/latest/download/humanify-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv humanify /usr/local/bin/
+curl -L https://github.com/jehna/humanify/releases/latest/download/humanify-lua-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv humanify-lua /usr/local/bin/
 
 # Linux (aarch64)
-curl -L https://github.com/jehna/humanify/releases/latest/download/humanify-aarch64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv humanify /usr/local/bin/
+curl -L https://github.com/jehna/humanify/releases/latest/download/humanify-lua-aarch64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv humanify-lua /usr/local/bin/
 
-# Windows: download humanify-x86_64-pc-windows-msvc.zip from the releases page
+# Windows: download humanify-lua-x86_64-pc-windows-msvc.zip from the releases page
 ```
 
 Or build from source:
@@ -127,7 +111,7 @@ cargo install --git https://github.com/jehna/humanify
 ### Usage
 
 ```shell
-humanify <openai|gemini|anthropic|ollama|openrouter|requesty> [FLAGS] <INPUT>
+humanify-lua <openai|gemini|anthropic|ollama|openrouter|requesty> [FLAGS] <INPUT>
 ```
 
 * `<INPUT>` is a file path or `-` for stdin.
@@ -142,15 +126,13 @@ humanify <openai|gemini|anthropic|ollama|openrouter|requesty> [FLAGS] <INPUT>
 * `-v` prints resolved configuration and identifier-level rename steps to stderr.
 * `--progress` shows an identifier progress bar on stderr.
 
-Run `humanify --help` for the full reference.
+Run `humanify-lua --help` for the full reference.
 
-Note: humanify does one job — rename identifiers in one JavaScript file in,
-one out. To unbundle webpack output first, pipe through e.g.
-[webcrack](https://github.com/j4k0xb/webcrack):
-
-```shell
-npx webcrack < bundle.min.js | humanify openai - -o bundle.js
-```
+Note: humanify-lua does one job — rename identifiers in one Lua file in, one out.
+It supports Lua 5.1 through 5.4, LuaJIT, and CitizenFX/FiveM syntax
+extensions (compound assignment, safe navigation, etc). It does not reverse
+control-flow flattening, string encryption, or other bytecode/VM-level
+obfuscation (e.g. from Luraph or Prometheus) — only identifier renaming.
 
 ### OpenAI mode
 
@@ -158,14 +140,14 @@ You'll need an OpenAI API key. Sign up at https://openai.com/ and create a
 key in the dashboard.
 
 ```shell
-humanify openai obfuscated.js -o readable.js -k your-token
+humanify-lua openai obfuscated.lua -o readable.lua -k your-token
 ```
 
 Or via environment variable:
 
 ```shell
 export OPENAI_API_KEY=your-token
-humanify openai obfuscated.js -o readable.js
+humanify-lua openai obfuscated.lua -o readable.lua
 ```
 
 Default model: `gpt-5-mini`. Override with `-m`.
@@ -177,7 +159,7 @@ Gemini's free tier is generous and is enough for most files.
 
 ```shell
 export GEMINI_API_KEY=your-token
-humanify gemini obfuscated.js -o readable.js
+humanify-lua gemini obfuscated.lua -o readable.lua
 ```
 
 Default model: `gemini-3.1-flash-lite`. Override with `-m`.
@@ -188,7 +170,7 @@ You'll need an Anthropic API key. Sign up at https://console.anthropic.com/.
 
 ```shell
 export ANTHROPIC_API_KEY=your-token
-humanify anthropic obfuscated.js -o readable.js
+humanify-lua anthropic obfuscated.lua -o readable.lua
 ```
 
 Default model: `claude-sonnet-4-6`. Override with `-m`.
@@ -211,18 +193,18 @@ Prerequisites:
 Then run:
 
 ```shell
-humanify ollama obfuscated.js -o readable.js
+humanify-lua ollama obfuscated.lua -o readable.lua
 ```
 
 Default model: `qwen3.5:4b`. Override with `-m` to use any model you've
 pulled. Local mode is free and private, but slower and less accurate than
 the hosted providers; quality depends on the model you pick.
 
-If you want to point humanify at a remote Ollama instance, override the
+If you want to point humanify-lua at a remote Ollama instance, override the
 base URL:
 
 ```shell
-humanify ollama obfuscated.js --base-url http://my-server:11434/v1
+humanify-lua ollama obfuscated.lua --base-url http://my-server:11434/v1
 ```
 
 ### OpenRouter mode
@@ -235,13 +217,13 @@ You'll need an OpenRouter API key. Sign up at https://openrouter.ai/.
 
 ```shell
 export OPENROUTER_API_KEY=your-token
-humanify openrouter obfuscated.js -o readable.js
+humanify-lua openrouter obfuscated.lua -o readable.lua
 ```
 
 Default model: `openai/gpt-oss-120b`. For free-tier usage:
 
 ```shell
-humanify openrouter obfuscated.js -m qwen/qwen3-coder:free
+humanify-lua openrouter obfuscated.lua -m qwen/qwen3-coder:free
 ```
 
 ### Requesty mode
@@ -253,25 +235,32 @@ You'll need a Requesty API key. Sign up at https://requesty.ai/.
 
 ```shell
 export REQUESTY_API_KEY=your-token
-humanify requesty obfuscated.js -o readable.js
+humanify-lua requesty obfuscated.lua -o readable.lua
 ```
 
 Default model: `nvidia/nemotron-3-super-120b-a12b`. Override with `-m`:
 
 ```shell
-humanify requesty obfuscated.js -m nvidia/nemotron-3-super-120b-a12b
+humanify-lua requesty obfuscated.lua -m nvidia/nemotron-3-super-120b-a12b
 ```
 
 ## Features
 
 * Uses LLMs to get smart suggestions to rename variable and function names, and
-  make the rename using deterministic AST-level shenanigans via [oxc][oxc]
-* Renames preserve all references and respect lexical scoping
+  make the rename deterministically with [full_moon][full_moon], a lossless
+  Lua parser — no reformatting, no reflowing, just renamed identifiers
+* Supports Lua 5.1, 5.2, 5.3, 5.4, LuaJIT, and CitizenFX/FiveM (`cfxlua`)
+  syntax extensions — compound assignment (`+=`), safe navigation (`?.`),
+  `local a, b in t` field-unpacking, `{ .a }` set constructors, C-style
+  `/* */` comments, and `` `hash` `` backtick string literals
+* Renames preserve all references and respect lexical scoping, including
+  upvalues captured by closures and the implicit `self` in `function t:m()`
+  methods
 * Reserved-word and collision-aware safe naming. The LLM's suggestion is
-  normalised to a valid JS identifier and `_`-prefixed if it collides with
-  an existing binding
+  normalised to a valid Lua identifier and suffixed with a number if it
+  collides with an existing binding
 
-[oxc]:https://github.com/oxc-project/oxc
+[full_moon]:https://github.com/Kampfkarren/full-moon
 
 ## Contributing
 

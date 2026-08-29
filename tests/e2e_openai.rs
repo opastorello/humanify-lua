@@ -5,7 +5,7 @@ use common::{given, humanify, JudgeConfig};
 #[tokio::test]
 #[ignore]
 async fn unminifies_example_file_with_openai() {
-    given("fixtures/example.min.js")
+    given("fixtures/example.min.lua")
         .judged_by(JudgeConfig::openai("gpt-5-mini"))
         .judge_says_minified()
         .await

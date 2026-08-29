@@ -5,7 +5,7 @@ use common::{given, humanify, JudgeConfig};
 #[tokio::test]
 #[ignore]
 async fn unminifies_example_file_with_gemini() {
-    given("fixtures/example.min.js")
+    given("fixtures/example.min.lua")
         .judged_by(JudgeConfig::gemini("gemini-3.1-flash-lite"))
         .judge_says_minified()
         .await

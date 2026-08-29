@@ -1,7 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
-
-use oxc_semantic::{AstNodes, ScopeId, Scoping, SymbolId};
-use oxc_str::Ident;
+use super::scope::{BindingId, ScopeModel};
 
 /// Split a trailing run of ASCII decimal digits off an identifier.
 ///
@@ -44,239 +41,169 @@ pub(crate) fn dedupe<F: Fn(&str) -> bool>(base: &str, is_taken: F) -> (String, b
     }
 }
 
-/// Scope-aware collision resolver.
+/// Returns true if renaming `binding` to `candidate` would change what any
+/// identifier in the chunk resolves to.
 ///
-/// Replaces the old file-global `taken` set (which forced whole-file name
-/// uniqueness and produced the `________index` underscore pileup). A candidate
-/// name only collides when it is actually visible in the same scope chain:
+/// Let `S` be the scope that declares `binding`. The rename is unsafe when:
 ///
-///   1. **Same scope or an ancestor** — detected via `Scoping::find_binding`,
-///      which walks up the scope tree. This prevents same-scope redeclaration
-///      and prevents shadowing an outer binding the new name would capture.
-///   2. **A descendant scope** — detected via an Euler-tour interval over the
-///      scope tree. Renaming an outer symbol to a name already bound in a nested
-///      scope would capture the outer symbol's references that occur inside that
-///      nested scope (e.g. renaming outer `a` to `x` in
-///      `var a; function f() { var x; return a; }` would silently rebind the
-///      `return a` to the inner `x`), so it must count as a collision. The
-///      descendant index is seeded from every existing binding and kept live by
-///      `commit`, so this holds no matter what order symbols are processed in.
-///   3. **An unresolved reference** — these are runtime globals or names supplied
-///      by the host application. Creating a binding with the same name could
-///      silently capture the existing reference.
+/// 1. **Another binding named `candidate` lives in `S` or a scope nested in
+///    `S`.** In the same scope the two declarations would shadow each other;
+///    in a nested scope, references to `binding` inside that nested scope
+///    would silently rebind to the inner declaration (renaming outer `a` to
+///    `x` in `local a; local function f() local x; return a end`).
+/// 2. **An identifier named `candidate` that resolves to something else
+///    (an outer local or a global) occurs inside `S`.** After the rename it
+///    would be captured by `binding` instead (`local a = 1; print(x)` with
+///    `a -> x` turns the global `x` into the local).
 ///
-/// Two identifiers in *disjoint* scopes (e.g. sibling functions) may freely
-/// share a name — exactly as JavaScript allows — so no underscores accrue.
-pub(crate) struct CollisionResolver {
-    /// Euler-tour enter index per scope (order of first visit in a DFS).
-    enter: HashMap<ScopeId, u32>,
-    /// Euler-tour exit index per scope. Scope `d` is a descendant of scope `a`
-    /// iff `enter[a] < enter[d] < exit[a]`.
-    exit: HashMap<ScopeId, u32>,
-    /// For each currently-bound name, the sorted set of enter-indices of the
-    /// scopes that bind it. Enables an O(log n) "is this name bound in any
-    /// descendant of scope X?" range query.
-    name_scopes: HashMap<String, BTreeSet<u32>>,
-    /// For each unresolved name, the scopes containing its references. These
-    /// may be runtime globals or host-provided names that no static browser or
-    /// Node global list could know about.
-    unresolved_name_scopes: HashMap<String, BTreeSet<u32>>,
-}
+/// Names in *disjoint* scopes (sibling functions) may freely be reused, so
+/// generic names like `index` don't accrue suffixes across the file.
+pub(crate) fn collides(model: &ScopeModel, binding: BindingId, candidate: &str) -> bool {
+    let scope = model.bindings[binding].scope;
+    let span = model.scopes[scope].span;
 
-impl CollisionResolver {
-    /// Build the scope tree Euler tour and seed the name index from every
-    /// existing binding (including names that will never be renamed, so that
-    /// descendant kept-names are still respected).
-    pub(crate) fn new(scoping: &Scoping, nodes: &AstNodes<'_>) -> Self {
-        // Build children adjacency from parent links.
-        let mut children: HashMap<ScopeId, Vec<ScopeId>> = HashMap::new();
-        for scope_id in scoping.scope_descendants_from_root() {
-            if let Some(parent) = scoping.scope_parent_id(scope_id) {
-                children.entry(parent).or_default().push(scope_id);
-            }
+    for (id, other) in model.bindings.iter().enumerate() {
+        if id == binding || other.name != candidate {
+            continue;
         }
-
-        // Iterative DFS from the root, assigning enter/exit indices so that a
-        // scope's descendants occupy a contiguous open interval of enter-indices.
-        let mut enter: HashMap<ScopeId, u32> = HashMap::new();
-        let mut exit: HashMap<ScopeId, u32> = HashMap::new();
-        let mut counter: u32 = 0;
-        let root = scoping.root_scope_id();
-        // Stack holds (scope, entered?). On first pop we record enter and push
-        // the scope back as "entered" plus its children; on second pop we record
-        // exit.
-        let mut stack: Vec<(ScopeId, bool)> = vec![(root, false)];
-        while let Some((scope_id, entered)) = stack.pop() {
-            if entered {
-                exit.insert(scope_id, counter);
-                continue;
-            }
-            enter.insert(scope_id, counter);
-            counter += 1;
-            stack.push((scope_id, true));
-            if let Some(kids) = children.get(&scope_id) {
-                for &kid in kids {
-                    stack.push((kid, false));
-                }
-            }
+        if model.is_within(other.scope, scope) {
+            return true;
         }
-
-        // Seed the name index from all current bindings.
-        let mut name_scopes: HashMap<String, BTreeSet<u32>> = HashMap::new();
-        for (scope_id, bindings) in scoping.iter_bindings() {
-            let Some(&idx) = enter.get(&scope_id) else {
-                continue;
-            };
-            for name in bindings.keys() {
-                name_scopes.entry(name.to_string()).or_default().insert(idx);
-            }
-        }
-        let mut unresolved_name_scopes = HashMap::new();
-        for (name, references) in scoping.root_unresolved_references() {
-            let indices = references
-                .iter()
-                .filter_map(|reference_id| {
-                    let reference = scoping.get_reference(*reference_id);
-                    let scope_id = nodes.get_node(reference.node_id()).scope_id();
-                    enter.get(&scope_id).copied()
-                })
-                .collect();
-            unresolved_name_scopes.insert(name.to_string(), indices);
-        }
-
-        CollisionResolver {
-            enter,
-            exit,
-            name_scopes,
-            unresolved_name_scopes,
+        if other.refs.iter().any(|r| span.contains(r.start)) {
+            return true;
         }
     }
 
-    /// Returns true if `candidate` cannot be assigned to `symbol` (declared in
-    /// `decl_scope`) without clashing with a binding visible in the same scope
-    /// chain (ancestor, same scope, or descendant).
-    pub(crate) fn collides(
-        &self,
-        scoping: &Scoping,
-        decl_scope: ScopeId,
-        symbol: SymbolId,
-        candidate: &str,
-    ) -> bool {
-        // An unresolved reference is captured only when it occurs in the
-        // declaration scope or one of its descendants. References in sibling
-        // or ancestor scopes cannot see this new binding.
-        if let (Some(&lo), Some(&hi)) = (self.enter.get(&decl_scope), self.exit.get(&decl_scope)) {
-            if let Some(indices) = self.unresolved_name_scopes.get(candidate) {
-                if indices.range(lo..hi).next().is_some() {
-                    return true;
-                }
-            }
-        }
-
-        // (1) Same scope or ancestor: find_binding walks up from decl_scope.
-        // A hit on the symbol itself is not a real collision (candidate == its
-        // own current name, i.e. a no-op rename).
-        if let Some(found) = scoping.find_binding(decl_scope, Ident::from(candidate)) {
-            if found != symbol {
-                return true;
-            }
-        }
-
-        // (2) Descendant scopes: is `candidate` bound anywhere strictly inside
-        // decl_scope's subtree? Query the open enter-index interval.
-        if let (Some(&lo), Some(&hi)) = (self.enter.get(&decl_scope), self.exit.get(&decl_scope)) {
-            if let Some(indices) = self.name_scopes.get(candidate) {
-                // Descendants have enter-index in (lo, hi).
-                if indices.range((lo + 1)..hi).next().is_some() {
-                    return true;
-                }
-            }
-        }
-
-        false
-    }
-
-    /// Record that `decl_scope`'s binding changed from `old_name` to `new_name`,
-    /// keeping the descendant index in sync for subsequent `collides` queries.
-    pub(crate) fn commit(&mut self, decl_scope: ScopeId, old_name: &str, new_name: &str) {
-        let Some(&idx) = self.enter.get(&decl_scope) else {
-            return;
-        };
-        if let Some(set) = self.name_scopes.get_mut(old_name) {
-            set.remove(&idx);
-            if set.is_empty() {
-                self.name_scopes.remove(old_name);
-            }
-        }
-        self.name_scopes
-            .entry(new_name.to_string())
-            .or_default()
-            .insert(idx);
-    }
+    model
+        .free_refs
+        .iter()
+        .any(|free| free.name == candidate && span.contains(free.span.start))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use super::super::test_dsl::{model_of, renaming};
+    use super::*;
 
-    use super::{dedupe, split_numeric_suffix};
-
-    #[test]
-    fn split_no_trailing_digits() {
-        assert_eq!(split_numeric_suffix("iterator"), ("iterator", None));
-    }
-
-    #[test]
-    fn split_trailing_digits() {
-        assert_eq!(split_numeric_suffix("index3"), ("index", Some(3)));
-        assert_eq!(
-            split_numeric_suffix("userAccountManager2"),
-            ("userAccountManager", Some(2))
-        );
-    }
-
-    #[test]
-    fn split_all_digits_is_treated_as_no_suffix() {
-        assert_eq!(split_numeric_suffix("123"), ("123", None));
-    }
+    // --- dedupe ---
 
     #[test]
     fn dedupe_free_name_unchanged() {
-        let taken: HashSet<&str> = HashSet::new();
-        assert_eq!(
-            dedupe("index", |c| taken.contains(c)),
-            ("index".to_string(), false)
-        );
+        assert_eq!(dedupe("index", |_| false), ("index".to_string(), false));
     }
 
     #[test]
-    fn dedupe_appends_when_no_trailing_number() {
-        let taken: HashSet<String> = ["index".to_string()].into_iter().collect();
+    fn dedupe_appends_two_first() {
         assert_eq!(
-            dedupe("index", |c| taken.contains(c)),
+            dedupe("index", |n| n == "index"),
             ("index2".to_string(), true)
         );
     }
 
     #[test]
-    fn dedupe_increments_existing_trailing_number() {
-        // The bug the user reported: `...Manager2` colliding must become
-        // `...Manager3`, not `...Manager22`.
-        let taken: HashSet<String> = ["userAccountManager2".to_string()].into_iter().collect();
+    fn dedupe_increments_existing_number() {
         assert_eq!(
-            dedupe("userAccountManager2", |c| taken.contains(c)),
-            ("userAccountManager3".to_string(), true)
+            dedupe("index3", |n| n == "index3"),
+            ("index4".to_string(), true)
         );
     }
 
     #[test]
-    fn dedupe_increments_until_free() {
-        let taken: HashSet<String> = ["index3".to_string(), "index4".to_string()]
-            .into_iter()
-            .collect();
+    fn dedupe_skips_taken_candidates() {
+        let taken = ["index", "index2", "index3"];
         assert_eq!(
-            dedupe("index3", |c| taken.contains(c)),
-            ("index5".to_string(), true)
+            dedupe("index", |n| taken.contains(&n)),
+            ("index4".to_string(), true)
         );
+    }
+
+    #[test]
+    fn split_numeric_suffix_all_digits_is_not_split() {
+        assert_eq!(split_numeric_suffix("123"), ("123", None));
+    }
+
+    // --- collides ---
+
+    #[test]
+    fn free_name_does_not_collide() {
+        assert!(!renaming(model_of("local a = 1"), "a")
+            .to("count")
+            .collides());
+    }
+
+    #[test]
+    fn own_name_does_not_collide() {
+        assert!(!renaming(model_of("local a = 1"), "a").to("a").collides());
+    }
+
+    #[test]
+    fn same_scope_binding_collides() {
+        assert!(renaming(model_of("local a, b = 1, 2"), "a")
+            .to("b")
+            .collides());
+    }
+
+    #[test]
+    fn nested_scope_binding_collides() {
+        assert!(renaming(
+            model_of("local a = 1\nlocal function f() local x = 2 return a end"),
+            "a"
+        )
+        .to("x")
+        .collides());
+    }
+
+    #[test]
+    fn global_referenced_inside_scope_collides() {
+        assert!(renaming(model_of("local a = 1\nprint(a)"), "a")
+            .to("print")
+            .collides());
+    }
+
+    #[test]
+    fn outer_local_referenced_inside_scope_collides() {
+        assert!(renaming(
+            model_of("local x = 1\nlocal function f() local a = 2 return a + x end"),
+            "a"
+        )
+        .to("x")
+        .collides());
+    }
+
+    #[test]
+    fn outer_local_not_referenced_inside_scope_may_be_shadowed() {
+        assert!(!renaming(
+            model_of("local x = 1\nlocal function f() local a = 2 return a end"),
+            "a"
+        )
+        .to("x")
+        .collides());
+    }
+
+    #[test]
+    fn sibling_scope_binding_does_not_collide() {
+        assert!(!renaming(
+            model_of("local function f() local a = 1 end\nlocal function g() local b = 2 end"),
+            "a"
+        )
+        .to("b")
+        .collides());
+    }
+
+    #[test]
+    fn global_referenced_outside_scope_does_not_collide() {
+        assert!(!renaming(
+            model_of("local function f() local a = 1 return a end\nprint(f())"),
+            "a"
+        )
+        .to("print")
+        .collides());
+    }
+
+    #[test]
+    fn implicit_self_collides() {
+        assert!(renaming(model_of("function T:m(a) return a end"), "a")
+            .to("self")
+            .collides());
     }
 }

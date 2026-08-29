@@ -14,51 +14,51 @@
 //! hosted-API tests avoid spinning up local Ollama entirely, and only
 //! e2e_ollama / e2e_judge depend on it.
 
-use humanify::{
+use humanify_lua::{
     AnthropicToolCallAndPrompt, HttpClient, JsonStrategy, OpenAIJsonSchema, StrategyError,
 };
 use serde_json::{json, Value};
 use std::time::Duration;
 
-const JUDGE_SYSTEM: &str = "You are a code-readability judge. You receive JavaScript source code and respond with exactly one verdict. Respond with JSON only.
+const JUDGE_SYSTEM: &str = "You are a code-readability judge. You receive Lua source code and respond with exactly one verdict. Respond with JSON only.
 
 Verdicts:
 - EXCELLENT: every identifier reads like normal, descriptive code.
 - GOOD: most identifiers are descriptive; a few are still vague but plausible.
-- GIBBERISH: most identifiers are sensible, but at least one is clearly wrong or nonsensical for what it represents (e.g. a function that adds numbers named `parseHTMLTree`, a counter named `purpleElephant`). Use this when the code looks renamed but contains an obvious hallucination.
+- GIBBERISH: most identifiers are sensible, but at least one is clearly wrong or nonsensical for what it represents (e.g. a function that adds numbers named `parse_html_tree`, a counter named `purple_elephant`). Use this when the code looks renamed but contains an obvious hallucination.
 - MINIFIED: identifiers are single letters, random-looking, or otherwise minified/obfuscated.
 
 Examples:
 
 Code:
-```javascript
-function addNumbers(a, b) { return a + b; }
-const total = addNumbers(3, 4);
+```lua
+local function add_numbers(a, b) return a + b end
+local total = add_numbers(3, 4)
 ```
 Verdict: EXCELLENT
 
 Code:
-```javascript
-function process(data, opts) { return data.map(x => x * opts.factor); }
-const result = process([1,2,3], { factor: 2 });
+```lua
+local function process(data, opts) return data.factor * #data end
+local result = process({1, 2, 3}, { factor = 2 })
 ```
 Verdict: GOOD
 
 Code:
-```javascript
-function parseHTMLTree(a, b) { return a + b; }
-const purpleElephant = parseHTMLTree(3, 4);
+```lua
+local function parse_html_tree(a, b) return a + b end
+local purple_elephant = parse_html_tree(3, 4)
 ```
 Verdict: GIBBERISH
 
 Code:
-```javascript
-function a(b,c){return b+c}var d=a(3,4);
+```lua
+local function a(b,c)return b+c end local d=a(3,4)
 ```
 Verdict: MINIFIED";
 
 fn judge_user(code: &str) -> String {
-    format!("Source:\n```javascript\n{code}\n```\n\nVerdict:")
+    format!("Source:\n```lua\n{code}\n```\n\nVerdict:")
 }
 
 fn judge_schema() -> Value {
