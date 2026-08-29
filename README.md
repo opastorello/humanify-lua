@@ -9,17 +9,6 @@ code. The LLM only suggests new identifier names; the heavy lifting is done by
 so the rewritten code is byte-identical to the input except for the renamed
 identifiers — humanify does not reformat or reindent your code.
 
-## Version 3 is out! 🎉
-
-v3 highlights compared to v2:
-
-* **Single static binary:** (Rust) — grab a binary from Releases. No Node, no
-  npm, no Python.
-* **Unix-style I/O**: read from stdin or a file, write to stdout or `-o <file>`.
-* **New providers:** Ollama (local), Anthropic and OpenRouter.
-
-Check out the [v3 PR](https://github.com/jehna/humanify/pull/744) for more info.
-
 ## Example
 
 Given the following minified code in `splitstring.min.lua`:
@@ -80,23 +69,23 @@ but expect them to be heaviy rate limited.
 ### Installation
 
 The preferred way to install humanify-lua is to download a pre-built binary from the
-[latest release](https://github.com/jehna/humanify/releases/latest).
+[latest release](https://github.com/opastorello/humanify-lua/releases/latest).
 
 ```shell
 # macOS (Apple Silicon)
-curl -L https://github.com/jehna/humanify/releases/latest/download/humanify-lua-aarch64-apple-darwin.tar.gz | tar xz
+curl -L https://github.com/opastorello/humanify-lua/releases/latest/download/humanify-lua-aarch64-apple-darwin.tar.gz | tar xz
 sudo mv humanify-lua /usr/local/bin/
 
 # macOS (Intel)
-curl -L https://github.com/jehna/humanify/releases/latest/download/humanify-lua-x86_64-apple-darwin.tar.gz | tar xz
+curl -L https://github.com/opastorello/humanify-lua/releases/latest/download/humanify-lua-x86_64-apple-darwin.tar.gz | tar xz
 sudo mv humanify-lua /usr/local/bin/
 
 # Linux (x86_64)
-curl -L https://github.com/jehna/humanify/releases/latest/download/humanify-lua-x86_64-unknown-linux-gnu.tar.gz | tar xz
+curl -L https://github.com/opastorello/humanify-lua/releases/latest/download/humanify-lua-x86_64-unknown-linux-gnu.tar.gz | tar xz
 sudo mv humanify-lua /usr/local/bin/
 
 # Linux (aarch64)
-curl -L https://github.com/jehna/humanify/releases/latest/download/humanify-lua-aarch64-unknown-linux-gnu.tar.gz | tar xz
+curl -L https://github.com/opastorello/humanify-lua/releases/latest/download/humanify-lua-aarch64-unknown-linux-gnu.tar.gz | tar xz
 sudo mv humanify-lua /usr/local/bin/
 
 # Windows: download humanify-lua-x86_64-pc-windows-msvc.zip from the releases page
@@ -105,7 +94,7 @@ sudo mv humanify-lua /usr/local/bin/
 Or build from source:
 
 ```shell
-cargo install --git https://github.com/jehna/humanify
+cargo install --git https://github.com/opastorello/humanify-lua
 ```
 
 ### Usage
@@ -268,7 +257,7 @@ If you'd like to contribute, please fork the repository and use a feature
 branch. Pull requests are warmly welcome.
 
 ```shell
-git clone https://github.com/jehna/humanify
+git clone https://github.com/opastorello/humanify-lua
 cd humanify
 cargo build
 cargo test
@@ -284,11 +273,11 @@ burning API credits on every PR.
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=jehna%2Fhumanify&type=date&legend=top-left">
+<a href="https://www.star-history.com/?repos=opastorello%2Fhumanify-lua&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=jehna/humanify&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=jehna/humanify&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=jehna/humanify&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=opastorello/humanify-lua&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=opastorello/humanify-lua&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=opastorello/humanify-lua&type=date&legend=top-left" />
  </picture>
 </a>
 
