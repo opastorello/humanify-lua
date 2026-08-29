@@ -68,32 +68,32 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} --bin humanify
+        run: cargo build --release --target ${{ matrix.target }} --bin humanify-lua
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-gcc' || '' }}
 
       - name: Package (Linux/macOS)
         if: runner.os != 'Windows'
-        run: tar czf humanify-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release humanify
+        run: tar czf humanify-lua-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release humanify-lua
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path target/${{ matrix.target }}/release/humanify.exe -DestinationPath humanify-${{ matrix.target }}.zip
+        run: Compress-Archive -Path target/${{ matrix.target }}/release/humanify-lua.exe -DestinationPath humanify-lua-${{ matrix.target }}.zip
 
       - name: Upload artifact (Linux/macOS)
         if: runner.os != 'Windows'
         uses: actions/upload-artifact@v5
         with:
-          name: humanify-${{ matrix.target }}
-          path: humanify-${{ matrix.target }}.tar.gz
+          name: humanify-lua-${{ matrix.target }}
+          path: humanify-lua-${{ matrix.target }}.tar.gz
 
       - name: Upload artifact (Windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v5
         with:
-          name: humanify-${{ matrix.target }}
-          path: humanify-${{ matrix.target }}.zip
+          name: humanify-lua-${{ matrix.target }}
+          path: humanify-lua-${{ matrix.target }}.zip
 
   release:
     needs: build
@@ -105,7 +105,7 @@ jobs:
 
       - uses: actions/download-artifact@v5
         with:
-          pattern: humanify-*
+          pattern: humanify-lua-*
           merge-multiple: true
 
       - uses: softprops/action-gh-release@v2
@@ -114,6 +114,6 @@ jobs:
           name: ${{ github.ref_name }}
           generate_release_notes: true
           files: |
-            humanify-*.tar.gz
-            humanify-*.zip
+            humanify-lua-*.tar.gz
+            humanify-lua-*.zip
           fail_on_unmatched_files: true
