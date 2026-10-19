@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`humanify-lua` is a single-binary Rust CLI that un-minifies Lua by asking an LLM for a better name for each identifier, then applying the rename deterministically with [full_moon](https://github.com/Kampfkarren/full-moon), a lossless Lua parser. The LLM never rewrites code — it only returns `{"name": "..."}` per identifier. One LLM call per identifier.
+`humanify-lua` is a single-binary Rust CLI that un-minifies Lua by asking an LLM for a better name for each identifier, then applying the rename deterministically with [full_moon](https://github.com/Kampfkarren/full-moon), a lossless Lua parser. The LLM never rewrites code — it only returns `{"name": "..."}` per identifier. One LLM call per identifier by default. Optional `--decision-provider jev|laya` checks name quality first and skips generation only for confident keeps.
 
 ## Commands
 
@@ -55,6 +55,8 @@ One `full_moon` gotcha: `TokenReference` implements both an inherent (`Token`, v
 - `ladder.rs::Ladder`: probes strategies in order on the first call, **locks** onto the first that succeeds, marks `NotSupported` ones dead (bitmask, max 64 strategies). `Ladder::pinned` is the single-strategy form used by `--json-mode <specific>`; there `NotSupported` is converted to `Transient` since no fallback exists. Lock-free via atomics; safe under concurrent calls.
 - `renamer.rs::LlmRenamer` bridges the sync `Renamer` trait to the async ladder with `Handle::block_on` — it **panics if called from inside the runtime**, which is why `run_preset` wraps the walker in `spawn_blocking`.
 - On any LLM failure `LlmRenamer` returns the original name, so a fully-offline run is an identity transform (this is what `tests/cli_smoke.rs` relies on). This module is language-agnostic — nothing here knows the input is Lua except the prompt text in `renamer.rs`.
+
+The optional `llm/decision.rs` client uses the shared Jev/Laya `POST /v1/systemone` contract. It asks a two-option `choice` question about the current name and gates on the keep option probability (default 0.95), not the provider-specific `confidence` field. Uncertain decisions fall through to the generative ladder. The first timeout, HTTP error or invalid answer disables the gate for the rest of the run. Decision credentials, model, URL and timeout are separate from the generative provider. `scripts/laya_mlx_server.py` serves an installed laya-mlx checkpoint on loopback using this protocol, loads weights once, and requires an exact client/server model match. Its protocol tests use only the Python standard library: `python3 -m unittest discover -s scripts -p 'test_*.py'`. `tests/decision_api.rs` exercises the real CLI against a local mock server.
 
 ### `cli/` — presets
 

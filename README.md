@@ -43,11 +43,101 @@ You can also pipe via stdin:
 cat splitstring.min.lua | humanify-lua openai - > splitstring.lua
 ```
 
+## Optional Jev / Laya decisions
+
+Use a System One decision API to check whether an identifier already has a
+meaningful name before asking your existing generative provider for a replacement.
+This works with every provider (`openai`, `anthropic`, `gemini`, `ollama`,
+`openrouter`, and `requesty`) and is **disabled by default**.
+
+Use `humanify-lua -h` for the command overview, or
+`humanify-lua openai -h` / `humanify-lua openai --help` for the decision
+options, defaults, environment variables and examples. The same options are
+available in every provider subcommand.
+
+For hosted [Jev](https://docs.typesafe.ai/api), configure a separate decision key:
+
+```shell
+export TYPESAFE_API_KEY=your-typesafe-key
+humanify-lua openai input.lua --decision-provider jev -o output.lua
+```
+
+For a local or self-hosted [Laya](https://github.com/NandhaKishorM/laya) server
+running `laya-serve`:
+
+```shell
+humanify-lua ollama input.lua --decision-provider laya \
+  --decision-base-url http://127.0.0.1:8000/v1 \
+  --decision-model english -o output.lua
+```
+
+The original provider still generates new names. Its model, URL and credentials
+remain separate from the decision service's configuration.
+
+| Option | Default / purpose |
+| --- | --- |
+| `--decision-provider jev\|laya` | Enable the optional preflight decision |
+| `--decision-base-url URL` | Jev: `https://api.typesafe.ai/v1`; Laya: `http://127.0.0.1:8000/v1` |
+| `--decision-model MODEL` | Jev: `jev-latest`; Laya: `english` (override for other checkpoints) |
+| `--decision-api-key KEY` | Overrides `TYPESAFE_API_KEY` for Jev or `LAYA_API_KEY` for Laya; local Laya may omit authentication |
+| `--decision-threshold NUMBER` | `0.95`; must be greater than `0.5` and at most `1` |
+| `--decision-timeout-seconds N` | `5`; increase for slow servers or Laya cold starts |
+
+The URL can also be the full `/v1/systemone` endpoint. Both services receive the
+identifier, language and surrounding code through the same `POST /v1/systemone`
+protocol. The gate asks a two-option `choice` question and skips generation only
+when the selected **keep** option meets the threshold. It uses the option's
+probability, not the providers' differently defined `confidence` fields. Tune
+thresholds separately against representative code for each model.
+
+An uncertain answer continues to the generative provider. A timeout, HTTP error,
+or invalid decision disables preflight decisions for the rest of that run and
+continues with the original provider, with one warning on stderr. `--verbose`
+reports skipped generative calls without printing API keys. Decisions do not
+change the parser's scope, reference or collision checks.
+
+Speed improvements are workload-dependent: every evaluated identifier adds a
+decision request, and only confident keeps save a generative request. This may
+be slower on heavily minified code where most identifiers need new names.
+Enabling a remote decision service sends it the same surrounding code used for
+renaming. No speed or naming-quality improvement has been established by the
+offline protocol tests.
+
+### Apple Silicon with laya-mlx
+
+If you have [laya-mlx](https://github.com/mizorewww/laya-mlx) installed, use the
+included bridge to expose its Python API over the same HTTP protocol. Run it
+with the Python interpreter that has `laya_mlx` installed:
+
+```shell
+python3 scripts/laya_mlx_server.py --offline \
+  --model aac6fef/laya-multilingual-mlx
+```
+
+`--offline` uses cached weights only; omit it for the first download. The bridge
+binds to `127.0.0.1:8000`, loads one checkpoint once, and serves predictions
+serially on the GPU. Wait for `Ready` before running Humanify. In another terminal:
+
+```shell
+humanify-lua openai input.lua --decision-provider laya \
+  --decision-base-url http://127.0.0.1:8000/v1 \
+  --decision-model aac6fef/laya-multilingual-mlx -o output.lua
+```
+
+The client model must exactly match the bridge's `--model`; it does not silently
+substitute checkpoints. `--port`, `--device cpu` and `--dtype float32` are available
+on the bridge. If you set `LAYA_API_KEY`, use the same value in the server and
+Humanify environments. Stop the server with Ctrl+C. Check readiness with
+`curl http://127.0.0.1:8000/health`.
+
+The bridge needs no additional web framework. Test its protocol without MLX or
+weights using `python3 -m unittest discover -s scripts -p 'test_*.py'`.
+
 ## Note on token usage
 
 🚨 **NOTE:** 🚨
 
-humanify-lua makes one LLM call per identifier in your code. For ChatGPT-class APIs
+By default, humanify-lua makes one LLM call per identifier in your code. For ChatGPT-class APIs
 the cost roughly scales with the number of identifiers and the surrounding
 context window (default 500 chars per call). A medium minified file (~500
 identifiers) typically costs in the range of $0.10–$1.00 with OpenAI's small
@@ -114,8 +204,11 @@ humanify-lua <openai|gemini|anthropic|ollama|openrouter|requesty> [FLAGS] <INPUT
   `forced-tool-call`, `tool-call-and-prompt`, `prompt`.
 * `-v` prints resolved configuration and identifier-level rename steps to stderr.
 * `--progress` shows an identifier progress bar on stderr.
+* `--decision-provider jev|laya` enables optional name-quality decisions; see
+  [Jev / Laya setup](#optional-jev--laya-decisions) for the separate API settings.
 
-Run `humanify-lua --help` for the full reference.
+Run `humanify-lua -h` for commands and `humanify-lua <COMMAND> -h`
+(or `--help`) for that provider's complete options and examples.
 
 Note: humanify-lua does one job — rename identifiers in one Lua file in, one out.
 It supports Lua 5.1 through 5.4, LuaJIT, and CitizenFX/FiveM syntax
@@ -234,6 +327,9 @@ humanify-lua requesty obfuscated.lua -m nvidia/nemotron-3-super-120b-a12b
 ```
 
 ## Features
+
+* Optional [Jev / Laya decisions](#optional-jev--laya-decisions), with hosted,
+  self-hosted and Apple Silicon MLX support; disabled by default.
 
 * Uses LLMs to get smart suggestions to rename variable and function names, and
   make the rename deterministically with [full_moon][full_moon], a lossless
