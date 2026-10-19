@@ -50,6 +50,9 @@ impl MockApi {
             while !stopped.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Poll accepts without blocking, then wait for request data.
+                        // Accepted sockets may inherit the listener's nonblocking mode.
+                        stream.set_nonblocking(false).unwrap();
                         let request = read_request(&mut stream);
                         let (status, body) = if request.path == "/v1/systemone" {
                             thread::sleep(delay);
@@ -107,7 +110,10 @@ impl MockApi {
 impl Drop for MockApi {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        self.worker.take().unwrap().join().unwrap();
+        let result = self.worker.take().unwrap().join();
+        if !thread::panicking() {
+            result.unwrap();
+        }
     }
 }
 
@@ -299,6 +305,17 @@ fn disabled_by_default_and_flags_available_for_all_providers() {
         .assert()
         .success();
     assert_eq!(api.requests.lock().unwrap()[0].path, "/v1/chat/completions");
+    for help in ["-h", "--help"] {
+        let result = Command::cargo_bin(BINARY)
+            .unwrap()
+            .arg(help)
+            .assert()
+            .success();
+        let text = String::from_utf8_lossy(&result.get_output().stdout);
+        assert!(text.contains("Optional Jev/Laya decisions are disabled by default"));
+        assert!(text.contains("Generate names with an OpenAI-compatible API"));
+        assert!(!text.contains("Shared by every generative provider"));
+    }
     for provider in [
         "openai",
         "anthropic",
@@ -307,14 +324,32 @@ fn disabled_by_default_and_flags_available_for_all_providers() {
         "openrouter",
         "requesty",
     ] {
-        let result = Command::cargo_bin(BINARY)
-            .unwrap()
-            .args([provider, "--help"])
-            .assert()
-            .success();
-        assert!(
-            String::from_utf8_lossy(&result.get_output().stdout).contains("--decision-provider")
-        );
+        for help in ["-h", "--help"] {
+            let result = Command::cargo_bin(BINARY)
+                .unwrap()
+                .args([provider, help])
+                .assert()
+                .success();
+            let text = String::from_utf8_lossy(&result.get_output().stdout);
+            for expected in [
+                "--decision-provider",
+                "Optional Jev/Laya decisions:",
+                "0.95",
+                "TYPESAFE_API_KEY",
+                "LAYA_API_KEY",
+                "Examples:",
+            ] {
+                assert!(
+                    text.contains(expected),
+                    "{provider} {help} is missing {expected}"
+                );
+            }
+            assert!(!text.contains("Shared by every generative provider"));
+            assert!(
+                text.contains("Arguments:"),
+                "ordinary arguments must retain their help heading"
+            );
+        }
     }
 }
 

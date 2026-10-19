@@ -10,31 +10,52 @@ pub enum DecisionProvider {
     Laya,
 }
 
-/// Shared by every generative provider. Disabled unless explicitly selected.
+// Shared by every generative provider. Keep this a regular comment: a clap Args
+// doc comment becomes command-level help when flattened into the subcommand.
 #[derive(Args, Default)]
 pub struct DecisionArgs {
-    /// Skip generative calls for names judged descriptive by Jev or Laya
-    #[arg(long, value_enum)]
+    /// Use Jev or Laya to decide which existing names to keep (disabled by default)
+    #[arg(long, value_enum, help_heading = "Optional Jev/Laya decisions")]
     pub decision_provider: Option<DecisionProvider>,
 
     /// Decision API base URL, including /v1 (or the full /systemone endpoint)
-    #[arg(long, requires = "decision_provider")]
+    #[arg(
+        long,
+        requires = "decision_provider",
+        help_heading = "Optional Jev/Laya decisions"
+    )]
     pub decision_base_url: Option<String>,
 
     /// Decision model (defaults: jev-latest for Jev, english for Laya)
-    #[arg(long, requires = "decision_provider")]
+    #[arg(
+        long,
+        requires = "decision_provider",
+        help_heading = "Optional Jev/Laya decisions"
+    )]
     pub decision_model: Option<String>,
 
     /// Decision API key (defaults: TYPESAFE_API_KEY or LAYA_API_KEY)
-    #[arg(long, requires = "decision_provider")]
+    #[arg(
+        long,
+        requires = "decision_provider",
+        help_heading = "Optional Jev/Laya decisions"
+    )]
     pub decision_api_key: Option<String>,
 
-    /// Minimum probability of keeping a name, greater than 0.5 and at most 1
-    #[arg(long, requires = "decision_provider")]
+    /// Minimum keep probability (default: 0.95; must be > 0.5 and <= 1)
+    #[arg(
+        long,
+        requires = "decision_provider",
+        help_heading = "Optional Jev/Laya decisions"
+    )]
     pub decision_threshold: Option<f64>,
 
     /// Decision request timeout in seconds (default: 5)
-    #[arg(long, requires = "decision_provider")]
+    #[arg(
+        long,
+        requires = "decision_provider",
+        help_heading = "Optional Jev/Laya decisions"
+    )]
     pub decision_timeout_seconds: Option<u64>,
 }
 

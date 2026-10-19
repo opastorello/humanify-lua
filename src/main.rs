@@ -5,7 +5,12 @@ use std::path::PathBuf;
 const EXIT_CLI_USAGE: i32 = 64;
 
 #[derive(Parser)]
-#[command(name = "humanify-lua", version, about = "Un-minify Lua with LLM help")]
+#[command(
+    name = "humanify-lua",
+    version,
+    about = "Un-minify Lua with LLM help",
+    after_help = "Optional Jev/Laya decisions are disabled by default. They evaluate existing names; your selected provider still generates new names.\nRun humanify-lua <COMMAND> --help for decision API options and examples."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -13,15 +18,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Generate names with an OpenAI-compatible API
     Openai(SubArgs),
+    /// Generate names with Gemini
     Gemini(SubArgs),
+    /// Generate names with Anthropic
     Anthropic(SubArgs),
+    /// Generate names with a local Ollama model
     Ollama(SubArgs),
+    /// Generate names through OpenRouter
     Openrouter(SubArgs),
+    /// Generate names through Requesty
     Requesty(SubArgs),
 }
 
 #[derive(Parser)]
+#[command(
+    after_help = "Examples:\n  humanify-lua openai input.lua --decision-provider jev\n  humanify-lua ollama input.lua --decision-provider laya --decision-base-url http://127.0.0.1:8000/v1\n\nJev uses TYPESAFE_API_KEY; Laya uses LAYA_API_KEY (optional for local servers).\nFor the MLX bridge, also set --decision-model to the exact model loaded by the server.\nDecision requests can increase runtime; the generative provider is still needed to propose new names."
+)]
 struct SubArgs {
     #[command(flatten)]
     decision: humanify_lua::llm::decision::DecisionArgs,
