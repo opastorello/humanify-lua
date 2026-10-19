@@ -31,3 +31,6 @@ jobs:
 
       - name: test
         run: cargo test
+
+      - name: Local MLX bridge protocol
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'

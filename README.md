@@ -98,6 +98,36 @@ Enabling a remote decision service sends it the same surrounding code used for
 renaming. No speed or naming-quality improvement has been established by the
 offline protocol tests.
 
+### Apple Silicon with laya-mlx
+
+If you have [laya-mlx](https://github.com/mizorewww/laya-mlx) installed, use the
+included bridge to expose its Python API over the same HTTP protocol. Run it
+with the Python interpreter that has `laya_mlx` installed:
+
+```shell
+python3 scripts/laya_mlx_server.py --offline \
+  --model aac6fef/laya-multilingual-mlx
+```
+
+`--offline` uses cached weights only; omit it for the first download. The bridge
+binds to `127.0.0.1:8000`, loads one checkpoint once, and serves predictions
+serially on the GPU. Wait for `Ready` before running Humanify. In another terminal:
+
+```shell
+humanify-lua openai input.lua --decision-provider laya \
+  --decision-base-url http://127.0.0.1:8000/v1 \
+  --decision-model aac6fef/laya-multilingual-mlx -o output.lua
+```
+
+The client model must exactly match the bridge's `--model`; it does not silently
+substitute checkpoints. `--port`, `--device cpu` and `--dtype float32` are available
+on the bridge. If you set `LAYA_API_KEY`, use the same value in the server and
+Humanify environments. Stop the server with Ctrl+C. Check readiness with
+`curl http://127.0.0.1:8000/health`.
+
+The bridge needs no additional web framework. Test its protocol without MLX or
+weights using `python3 -m unittest discover -s scripts -p 'test_*.py'`.
+
 ## Note on token usage
 
 🚨 **NOTE:** 🚨
