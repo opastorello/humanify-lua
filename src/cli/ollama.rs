@@ -25,6 +25,7 @@ pub struct Args {
     pub verbose: bool,
     pub progress: bool,
     pub timeout_seconds: Option<u64>,
+    pub decision: crate::llm::decision::DecisionArgs,
 }
 
 impl From<Args> for PresetArgs {
@@ -40,6 +41,7 @@ impl From<Args> for PresetArgs {
             verbose: a.verbose,
             progress: a.progress,
             timeout_seconds: a.timeout_seconds,
+            decision: a.decision,
         }
     }
 }

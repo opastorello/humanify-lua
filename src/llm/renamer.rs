@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::json;
 use tokio::runtime::Handle;
 
-use crate::llm::ladder::Ladder;
+use crate::llm::{decision::DecisionGate, ladder::Ladder};
 use crate::rename::Renamer;
 
 const SYSTEM_PROMPT: &str = "You are a senior software engineer reviewing minified or obfuscated Lua. Your job is to assign a single descriptive identifier name based on how the variable is used in the surrounding code. Return JSON only.";
@@ -19,11 +19,21 @@ const SYSTEM_PROMPT: &str = "You are a senior software engineer reviewing minifi
 pub struct LlmRenamer {
     ladder: Arc<Ladder>,
     runtime: Handle,
+    decision_gate: Option<DecisionGate>,
 }
 
 impl LlmRenamer {
     pub fn new(ladder: Arc<Ladder>, runtime: Handle) -> Self {
-        Self { ladder, runtime }
+        Self {
+            ladder,
+            runtime,
+            decision_gate: None,
+        }
+    }
+
+    pub fn with_decision_gate(mut self, gate: Option<DecisionGate>) -> Self {
+        self.decision_gate = gate;
+        self
     }
 }
 
@@ -31,6 +41,15 @@ impl Renamer for LlmRenamer {
     fn rename(&mut self, original: &str, surrounding_code: &str) -> String {
         if original.is_empty() {
             return String::new();
+        }
+
+        if let Some(gate) = &mut self.decision_gate {
+            if self
+                .runtime
+                .block_on(gate.should_keep(original, surrounding_code))
+            {
+                return original.to_string();
+            }
         }
 
         let user = format!(

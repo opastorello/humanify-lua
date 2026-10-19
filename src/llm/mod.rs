@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod decision;
 pub mod http;
 pub mod ladder;
 pub mod openai_compat;
@@ -15,6 +16,8 @@ pub use ladder::Ladder;
 pub use openai_compat::{ForcedToolCall, OpenAIJsonSchema, PromptToJson, ToolCallAndPrompt};
 pub use renamer::LlmRenamer;
 
+// async_trait adds #[must_use] to an already must-use boxed Future (Rust 1.99).
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait JsonStrategy: Send + Sync {
     /// Send `system` + `user` messages to the LLM and request a JSON response

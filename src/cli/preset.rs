@@ -53,6 +53,7 @@ pub struct PresetArgs {
     pub verbose: bool,
     pub progress: bool,
     pub timeout_seconds: Option<u64>,
+    pub decision: crate::llm::decision::DecisionArgs,
 }
 
 /// Returns Err with a user-facing message if `mode` is not valid for `kind`.
@@ -74,6 +75,14 @@ pub fn validate_json_mode_for_provider(mode: &JsonMode, kind: ProviderKind) -> R
 
 /// Drives the full pipeline for any preset. Returns process exit code (0 / 1 / 2 / 64).
 pub fn run_preset(args: PresetArgs, defaults: PresetDefaults) -> i32 {
+    let decision_gate =
+        match crate::llm::decision::DecisionGate::from_args(args.decision, "Lua", args.verbose) {
+            Ok(gate) => gate,
+            Err(message) => {
+                eprintln!("humanify: {message}");
+                return 64;
+            }
+        };
     let model_from_cli = args.model.is_some();
     let api_key_from_cli = args.api_key.is_some();
     let base_url_from_cli = args.base_url.is_some();
@@ -161,7 +170,8 @@ pub fn run_preset(args: PresetArgs, defaults: PresetDefaults) -> i32 {
     let timeout = std::time::Duration::from_secs(timeout_seconds);
     let client = HttpClient::with_timeout(timeout);
     let ladder = Arc::new(build_ladder(client, &cfg, defaults.provider_kind));
-    let mut renamer = LlmRenamer::new(Arc::clone(&ladder), rt.handle().clone());
+    let mut renamer =
+        LlmRenamer::new(Arc::clone(&ladder), rt.handle().clone()).with_decision_gate(decision_gate);
     let mut observer = CliObserver::new(cfg.verbose, args.progress, Arc::clone(&ladder));
     let context_size = cfg.context_size;
 
@@ -742,6 +752,7 @@ mod tests {
             verbose: false,
             progress: false,
             timeout_seconds: None,
+            decision: Default::default(),
         }
     }
 

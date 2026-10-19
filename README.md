@@ -43,11 +43,66 @@ You can also pipe via stdin:
 cat splitstring.min.lua | humanify-lua openai - > splitstring.lua
 ```
 
+## Optional Jev / Laya decisions
+
+Use a System One decision API to check whether an identifier already has a
+meaningful name before asking your existing generative provider for a replacement.
+This works with every provider (`openai`, `anthropic`, `gemini`, `ollama`,
+`openrouter`, and `requesty`) and is **disabled by default**.
+
+For hosted [Jev](https://docs.typesafe.ai/api), configure a separate decision key:
+
+```shell
+export TYPESAFE_API_KEY=your-typesafe-key
+humanify-lua openai input.lua --decision-provider jev -o output.lua
+```
+
+For a local or self-hosted [Laya](https://github.com/NandhaKishorM/laya) server
+running `laya-serve`:
+
+```shell
+humanify-lua ollama input.lua --decision-provider laya \
+  --decision-base-url http://127.0.0.1:8000/v1 \
+  --decision-model english -o output.lua
+```
+
+The original provider still generates new names. Its model, URL and credentials
+remain separate from the decision service's configuration.
+
+| Option | Default / purpose |
+| --- | --- |
+| `--decision-provider jev\|laya` | Enable the optional preflight decision |
+| `--decision-base-url URL` | Jev: `https://api.typesafe.ai/v1`; Laya: `http://127.0.0.1:8000/v1` |
+| `--decision-model MODEL` | Jev: `jev-latest`; Laya: `english` (override for other checkpoints) |
+| `--decision-api-key KEY` | Overrides `TYPESAFE_API_KEY` for Jev or `LAYA_API_KEY` for Laya; local Laya may omit authentication |
+| `--decision-threshold NUMBER` | `0.95`; must be greater than `0.5` and at most `1` |
+| `--decision-timeout-seconds N` | `5`; increase for slow servers or Laya cold starts |
+
+The URL can also be the full `/v1/systemone` endpoint. Both services receive the
+identifier, language and surrounding code through the same `POST /v1/systemone`
+protocol. The gate asks a two-option `choice` question and skips generation only
+when the selected **keep** option meets the threshold. It uses the option's
+probability, not the providers' differently defined `confidence` fields. Tune
+thresholds separately against representative code for each model.
+
+An uncertain answer continues to the generative provider. A timeout, HTTP error,
+or invalid decision disables preflight decisions for the rest of that run and
+continues with the original provider, with one warning on stderr. `--verbose`
+reports skipped generative calls without printing API keys. Decisions do not
+change the parser's scope, reference or collision checks.
+
+Speed improvements are workload-dependent: every evaluated identifier adds a
+decision request, and only confident keeps save a generative request. This may
+be slower on heavily minified code where most identifiers need new names.
+Enabling a remote decision service sends it the same surrounding code used for
+renaming. No speed or naming-quality improvement has been established by the
+offline protocol tests.
+
 ## Note on token usage
 
 🚨 **NOTE:** 🚨
 
-humanify-lua makes one LLM call per identifier in your code. For ChatGPT-class APIs
+By default, humanify-lua makes one LLM call per identifier in your code. For ChatGPT-class APIs
 the cost roughly scales with the number of identifiers and the surrounding
 context window (default 500 chars per call). A medium minified file (~500
 identifiers) typically costs in the range of $0.10–$1.00 with OpenAI's small
